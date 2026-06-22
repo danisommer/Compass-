@@ -258,6 +258,41 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 .req-list{list-style:none;padding:0;margin:16px auto;max-width:420px;text-align:left;display:flex;flex-direction:column;gap:6px}
 .req-list li{display:flex;align-items:center;gap:10px;font-size:13px;padding:7px 12px;background:var(--surface);border-radius:8px;border:1px solid var(--line)}
 .req-list li .mk{font-size:15px}
+/* ---- Grafo de matérias ---- */
+.grafo-wrap{display:flex;height:calc(100vh - 58px);overflow:hidden}
+.grafo-canvas{position:relative;flex:1;min-width:0;background:radial-gradient(circle at 30% 15%, #141b2c, var(--bg))}
+#grafo-svg{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+#grafo-svg.panning{cursor:grabbing}
+.ge{stroke:#36436a;stroke-width:1.5;transition:opacity .15s,stroke .15s}
+.ge.hot{stroke:var(--primary);stroke-width:2.5}
+.ge.dim{opacity:.05}
+.gn{cursor:pointer}
+.gn rect{stroke:#2a3550;stroke-width:1.5;transition:opacity .15s,stroke-width .1s}
+.gn .gn-lbl{font:700 11px 'JetBrains Mono',monospace;text-anchor:middle;dominant-baseline:middle;pointer-events:none}
+.gn .gn-badge{font:700 11px sans-serif;text-anchor:middle;dominant-baseline:middle;fill:#fff;pointer-events:none}
+.gn.tipo-OBR rect{fill:var(--obr)} .gn.tipo-HUM rect{fill:var(--hum)} .gn.tipo-OPT rect{fill:var(--estrato)}
+.gn.tipo-TRI rect{fill:var(--trilha)} .gn.tipo-ELE rect{fill:var(--elet)}
+.gn.st-concluida rect{stroke:var(--success);stroke-width:3}
+.gn.st-cursando rect{stroke:#cfe0ff;stroke-width:2.5;stroke-dasharray:4 2}
+.gn.st-disponivel rect{stroke:#ffffff;stroke-width:2}
+.gn.st-bloqueada{opacity:.5} .gn.st-bloqueada rect{stroke:#71809c;stroke-dasharray:2 3}
+.gn.dim{opacity:.12} .gn.st-bloqueada.dim{opacity:.07}
+.gn.hot rect{stroke-width:3.5}
+.gn.sel rect{stroke:var(--primary);stroke-width:4}
+.grafo-painel{width:330px;flex:none;background:var(--surface);border-left:1px solid var(--line);padding:16px 18px;overflow:auto}
+.grafo-painel h3{margin:0 6px 4px 0;font-size:15px}
+.grafo-painel h4{margin:16px 0 4px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.gp-list{list-style:none;margin:0;padding:0;font-size:12px;line-height:1.7}
+.gp-list .muted{color:var(--muted)}
+.gp-status{display:inline-block;margin-top:10px;padding:4px 9px;border-radius:6px;font-size:12px;font-weight:600;background:var(--surface2)}
+.gp-status.st-concluida{color:var(--success)} .gp-status.st-cursando{color:#cfe0ff}
+.gp-status.st-disponivel{color:#fff} .gp-status.st-bloqueada{color:var(--secondary)}
+.gp-empty{color:var(--muted);font-size:13px;line-height:1.6}
+.grafo-legend{position:absolute;left:12px;bottom:12px;background:rgba(15,17,23,.88);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:11px;display:flex;flex-direction:column;gap:7px;max-width:280px;backdrop-filter:blur(3px)}
+.grafo-legend .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.grafo-legend b{color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;font-size:10px}
+.grafo-legend i{display:inline-block;width:13px;height:13px;border-radius:3px;vertical-align:-2px;margin-right:4px;border:1px solid #2a3550}
+.grafo-legend i.ring{background:transparent}
 </style>
 </head>
 <body>
@@ -1190,6 +1225,7 @@ function render(){
   if (S.fase==='upload') return renderUpload();
   if (S.fase==='divergencias') return renderDivergencias();
   if (S.fase==='preferencias') return renderPreferencias();
+  if (S.fase==='grafo'){ derive(); return renderGrafo(); }
   if (S.fase==='app'){ derive(); return renderApp(); }
 }
 
@@ -1385,6 +1421,187 @@ function initTrilhasDrag(){
 }
 
 /* ===================================================================
+   Grafo de matérias (obrigatórias + trilhas) — force-directed em SVG
+   =================================================================== */
+let GRAFO = null;
+const ROT_STATUS = { concluida:'Concluída', cursando:'Cursando agora', disponivel:'Disponível', bloqueada:'Bloqueada (faltam pré-req)' };
+const NODE_HALF = 30;
+
+function grafoDados(){
+  const incl = d => !d.isOpcional || d.conjuntoOptativo==='1160';     // obrigatórias + trilhas
+  const discs = D.matriz.disciplinas.filter(incl);
+  const setCods = new Set(discs.map(d=>d.codigo));
+  const aprov = D.cursadasBase;
+  const andamento = new Set(D.emAndamento);
+  const feitas = new Set([...aprov, ...andamento]);
+  const semPlan = {};
+  (D.projecao||[]).forEach(s=>{ if(s.idx>0 && s.grade && s.grade.sel) s.grade.sel.forEach(x=>{
+    const c=x.disciplina&&x.disciplina.codigo; if(c && setCods.has(c) && semPlan[c]==null && !x.bloqueado) semPlan[c]=s.idx; }); });
+  const statusDe = cod=>{
+    if (aprov.has(cod)) return 'concluida';
+    if (andamento.has(cod)) return 'cursando';
+    const v=D.grafo.get(cod); let ok=true; if(v) v.in.forEach(p=>{ if(!feitas.has(p)) ok=false; });
+    return ok?'disponivel':'bloqueada';
+  };
+  const nodes = discs.map(d=>({ cod:d.codigo, d, tipo:tipoDe(d), status:statusDe(d.codigo),
+    sem:semPlan[d.codigo], per:d.periodoSugerido||0, x:0, y:0, dx:0, dy:0 }));
+  const edges=[];
+  for (const d of discs) for (const p of d.preRequisitos) if (setCods.has(p)) edges.push({ from:p, to:d.codigo });
+  return { nodes, edges, byCod:new Map(nodes.map(n=>[n.cod,n])), sel:null, view:{x:0,y:0,k:1} };
+}
+
+// Fruchterman–Reingold: posições estáveis precomputadas (semeadas por período)
+function layoutForca(g, W, H, iters){
+  const n=g.nodes.length; if(!n) return;
+  const k=Math.sqrt((W*H)/n)*0.8;
+  g.nodes.forEach((nd,i)=>{ const p=nd.per>0?nd.per:4; nd.x=(p/9)*W + (Math.random()*80-40); nd.y=(H*0.08) + (i*131%Math.max(1,H-100)) + (Math.random()*40-20); });
+  const adj=g.edges.map(e=>[g.byCod.get(e.from), g.byCod.get(e.to)]).filter(a=>a[0]&&a[1]);
+  let t=W*0.10;
+  for(let it=0; it<iters; it++){
+    g.nodes.forEach(v=>{ v.dx=0; v.dy=0; });
+    for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){ const a=g.nodes[i],b=g.nodes[j];
+      let dx=a.x-b.x, dy=a.y-b.y, dist=Math.hypot(dx,dy)||0.01; const f=k*k/dist, ux=dx/dist, uy=dy/dist;
+      a.dx+=ux*f; a.dy+=uy*f; b.dx-=ux*f; b.dy-=uy*f; }
+    for(const [a,b] of adj){ let dx=a.x-b.x, dy=a.y-b.y, dist=Math.hypot(dx,dy)||0.01; const f=dist*dist/k, ux=dx/dist, uy=dy/dist;
+      a.dx-=ux*f; a.dy-=uy*f; b.dx+=ux*f; b.dy+=uy*f; }
+    g.nodes.forEach(v=>{ v.dx+=(W/2-v.x)*0.012; v.dy+=(H/2-v.y)*0.012;
+      let d=Math.hypot(v.dx,v.dy)||0.01, m=Math.min(d,t); v.x+=v.dx/d*m; v.y+=v.dy/d*m; });
+    t*=0.965;
+  }
+}
+
+// cadeia transitiva (dir='in' pré-reqs | 'out' desbloqueia) restrita aos nós do grafo
+function cadeiaGrafo(cod, dir){
+  const seen=new Set(), st=[cod];
+  while(st.length){ const c=st.pop(), v=D.grafo.get(c); if(!v) continue;
+    v[dir].forEach(x=>{ if(GRAFO.byCod.has(x) && !seen.has(x)){ seen.add(x); st.push(x); } }); }
+  return seen;
+}
+
+function grafoNodeHTML(nd){
+  const claro = (nd.tipo==='HUM'||nd.tipo==='ELE');
+  const badge = nd.status==='concluida' ? '<text class="gn-badge" x="22" y="-7">✓</text>'
+              : nd.status==='cursando'  ? '<text class="gn-badge" x="22" y="-7">●</text>' : '';
+  const tip = `${esc(nd.d.nome)}\\n${esc(nd.cod)} · ${nd.tipo} · ${nd.d.chTotal}h\\nStatus: ${ROT_STATUS[nd.status]}`
+    + (nd.sem!=null?`\\nPlanejada: ${esc(rotuloSem(nd.sem))}`:'')
+    + `\\nPré-req: ${nd.d.preRequisitos.join(', ')||'nenhum'}\\n(clique p/ ver a cadeia)`;
+  return `<g class="gn tipo-${nd.tipo} st-${nd.status}" data-grafo-node="${esc(nd.cod)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})" data-tip="${tip}">`
+    + `<rect x="${-NODE_HALF}" y="-13" width="${NODE_HALF*2}" height="26" rx="6"></rect>`
+    + `<text class="gn-lbl" x="0" y="1" fill="${claro?'#fff':'#06122b'}">${esc(nd.cod)}</text>${badge}</g>`;
+}
+function grafoEdgeHTML(e){
+  const a=GRAFO.byCod.get(e.from), b=GRAFO.byCod.get(e.to); if(!a||!b) return '';
+  let dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy)||1, ux=dx/d, uy=dy/d;
+  const x1=(a.x+ux*20).toFixed(1), y1=(a.y+uy*15).toFixed(1), x2=(b.x-ux*36).toFixed(1), y2=(b.y-uy*16).toFixed(1);
+  return `<line class="ge" data-from="${esc(e.from)}" data-to="${esc(e.to)}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#grafo-seta)"></line>`;
+}
+
+function grafoLegendaHTML(){
+  const areas = [['OBR','Obrigatória','--obr'],['TRI','Trilha','--trilha']];
+  return `<div class="grafo-legend">
+    <div><b>Área (cor)</b><div class="row" style="margin-top:4px">${areas.map(([,t,v])=>`<span><i style="background:var(${v})"></i>${t}</span>`).join('')}</div></div>
+    <div><b>Status (borda)</b><div class="row" style="margin-top:4px">
+      <span><i class="ring" style="border:3px solid var(--success)"></i>Concluída</span>
+      <span><i class="ring" style="border:2.5px dashed #cfe0ff"></i>Cursando</span>
+      <span><i class="ring" style="border:2px solid #fff"></i>Disponível</span>
+      <span><i class="ring" style="border:2px dashed #71809c;opacity:.6"></i>Bloqueada</span>
+    </div></div></div>`;
+}
+function grafoPainelVazioHTML(){
+  return `<div class="gp-empty"><h3 style="color:var(--text)">Grafo de pré-requisitos</h3>
+    Mostra as <b>obrigatórias</b> e as <b>trilhas</b> e como uma destrava a outra.<br><br>
+    • <b>Clique</b> numa matéria para acender a cadeia de pré-requisitos (o que vem antes) e o que ela <b>libera</b> (o que vem depois), e ver os detalhes aqui.<br>
+    • <b>Arraste o fundo</b> para mover e use a <b>roda do mouse</b> para zoom.<br>
+    • Botão <b>Ajustar</b> reenquadra tudo.</div>`;
+}
+function pintarPainelGrafo(cod){
+  const el=document.getElementById('grafo-painel'); if(!el) return;
+  const nd = cod && GRAFO.byCod.get(cod);
+  if(!nd){ el.innerHTML = grafoPainelVazioHTML(); return; }
+  const d=nd.d;
+  const preq = d.preRequisitos.length ? d.preRequisitos.map(p=>{ const ok=D.cursadasBase.has(p)||D.emAndamento.includes(p); const nm=D.byCod.get(p);
+      return `<li>${ok?'<span style="color:var(--success)">✓</span>':'<span style="color:var(--secondary)">✗</span>'} <b class="mono">${esc(p)}</b> ${nm?esc(nm.nome):''}</li>`; }).join('') : '<li class="muted">nenhum</li>';
+  const vout=D.grafo.get(cod); const out = vout ? [...vout.out].filter(c=>GRAFO.byCod.has(c)) : [];
+  const desbloq = out.length ? out.map(c=>{ const nm=D.byCod.get(c); return `<li><b class="mono">${esc(c)}</b> ${nm?esc(nm.nome):''}</li>`; }).join('') : '<li class="muted">nenhuma</li>';
+  el.innerHTML = `<button class="btn btn-sm btn-ghost" id="grafo-limpar" style="float:right">Limpar ✕</button>
+    <h3>${esc(d.nome)}</h3>
+    <div class="muted mono" style="font-size:12px">${esc(cod)} · <span class="tag ${nd.tipo}">${nd.tipo}</span> · ${d.chTotal}h${d.chExt>0?(' · ext '+d.chExt+'h'):''}</div>
+    <div class="gp-status st-${nd.status}">${ROT_STATUS[nd.status]}${nd.sem!=null?` · planejada p/ ${esc(rotuloSem(nd.sem))}`:''}</div>
+    <h4>Pré-requisitos (${d.preRequisitos.length})</h4><ul class="gp-list">${preq}</ul>
+    <h4>Libera / desbloqueia (${out.length})</h4><ul class="gp-list">${desbloq}</ul>`;
+}
+
+function selecionarNoGrafo(cod){
+  if(!GRAFO) return;
+  GRAFO.sel = cod || null;
+  const svg=document.getElementById('grafo-svg'); if(!svg) return;
+  const nodes=svg.querySelectorAll('.gn'), edges=svg.querySelectorAll('.ge');
+  if(!cod){ nodes.forEach(n=>n.classList.remove('dim','hot','sel')); edges.forEach(e=>e.classList.remove('dim','hot')); pintarPainelGrafo(null); return; }
+  const anc=cadeiaGrafo(cod,'in'), desc=cadeiaGrafo(cod,'out'), rel=new Set([cod,...anc,...desc]);
+  nodes.forEach(n=>{ const c=n.dataset.grafoNode; n.classList.toggle('sel',c===cod); n.classList.toggle('hot',rel.has(c)&&c!==cod); n.classList.toggle('dim',!rel.has(c)); });
+  edges.forEach(e=>{ const on=rel.has(e.dataset.from)&&rel.has(e.dataset.to); e.classList.toggle('hot',on); e.classList.toggle('dim',!on); });
+  pintarPainelGrafo(cod);
+}
+
+function grafoApplyView(){ const cam=document.getElementById('grafo-cam'); if(cam&&GRAFO) cam.setAttribute('transform',`translate(${GRAFO.view.x},${GRAFO.view.y}) scale(${GRAFO.view.k})`); }
+function grafoFit(){
+  const svg=document.getElementById('grafo-svg'); if(!svg||!GRAFO||!GRAFO.nodes.length) return;
+  const xs=GRAFO.nodes.map(n=>n.x), ys=GRAFO.nodes.map(n=>n.y);
+  const minx=Math.min(...xs)-NODE_HALF-20, maxx=Math.max(...xs)+NODE_HALF+20, miny=Math.min(...ys)-30, maxy=Math.max(...ys)+30;
+  const w=Math.max(1,maxx-minx), h=Math.max(1,maxy-miny), r=svg.getBoundingClientRect();
+  const k=Math.max(0.2, Math.min(2, Math.min(r.width/w, r.height/h)));
+  GRAFO.view.k=k; GRAFO.view.x=(r.width-w*k)/2-minx*k; GRAFO.view.y=(r.height-h*k)/2-miny*k;
+  grafoApplyView();
+}
+window.__grafoFit = grafoFit;
+
+let _grafoMove=null, _grafoUp=null;
+function wireGrafo(){
+  const svg=document.getElementById('grafo-svg'); if(!svg) return;
+  let panning=false, sx=0, sy=0, ox=0, oy=0;
+  svg.addEventListener('mousedown', e=>{ if(e.target.closest('.gn')) return; panning=true; sx=e.clientX; sy=e.clientY; ox=GRAFO.view.x; oy=GRAFO.view.y; svg.classList.add('panning'); });
+  const move=e=>{ if(!panning) return; GRAFO.view.x=ox+(e.clientX-sx); GRAFO.view.y=oy+(e.clientY-sy); grafoApplyView(); };
+  const up=()=>{ if(panning){ panning=false; svg.classList.remove('panning'); } };
+  if(_grafoMove) window.removeEventListener('mousemove',_grafoMove);
+  if(_grafoUp) window.removeEventListener('mouseup',_grafoUp);
+  _grafoMove=move; _grafoUp=up;
+  window.addEventListener('mousemove',move); window.addEventListener('mouseup',up);
+  svg.addEventListener('wheel', e=>{ e.preventDefault(); const r=svg.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    const k2=Math.max(0.2, Math.min(3, GRAFO.view.k*(e.deltaY<0?1.12:1/1.12)));
+    GRAFO.view.x=mx-(mx-GRAFO.view.x)*(k2/GRAFO.view.k); GRAFO.view.y=my-(my-GRAFO.view.y)*(k2/GRAFO.view.k); GRAFO.view.k=k2; grafoApplyView(); }, {passive:false});
+}
+
+function renderGrafo(){
+  if (!D.matriz){ S.fase='upload'; return render(); }
+  GRAFO = grafoDados();
+  layoutForca(GRAFO, 1280, 820, 340);
+  const edgesSVG = GRAFO.edges.map(grafoEdgeHTML).join('');
+  const nodesSVG = GRAFO.nodes.map(grafoNodeHTML).join('');
+  const cont = GRAFO.nodes.reduce((a,n)=>{ a[n.status]=(a[n.status]||0)+1; return a; }, {});
+  root.innerHTML = `
+  <div class="topbar">
+    <button class="btn btn-sm btn-ghost" id="voltar-plano">← Voltar ao planejador</button>
+    <div class="logo">C+</div><div class="who">🗺️ Grafo de matérias</div>
+    <div class="meta">
+      <span class="muted" style="font-size:12px">${GRAFO.nodes.length} matérias (obrig.+trilhas) · ${cont.concluida||0} concl. · ${cont.cursando||0} cursando · ${cont.disponivel||0} disp. · ${cont.bloqueada||0} bloq.</span>
+      <button class="btn btn-sm btn-ghost" id="grafo-ajustar">Ajustar</button>
+    </div>
+  </div>
+  <div class="grafo-wrap">
+    <div class="grafo-canvas">
+      <svg id="grafo-svg" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="grafo-seta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5a6b8c"></path></marker></defs>
+        <g id="grafo-cam"><g id="grafo-edges">${edgesSVG}</g><g id="grafo-nodes">${nodesSVG}</g></g>
+      </svg>
+      ${grafoLegendaHTML()}
+    </div>
+    <aside class="grafo-painel" id="grafo-painel">${grafoPainelVazioHTML()}</aside>
+  </div>`;
+  wireGrafo();
+  requestAnimationFrame(grafoFit);
+}
+
+/* ===================================================================
    APP principal
    =================================================================== */
 function renderApp(){
@@ -1401,6 +1618,7 @@ function renderApp(){
       <div class="stat"><b>${(al.coeficienteAbsoluto||0).toFixed(4)}</b><span>Coef. absoluto</span></div>
       <div class="stat"><b>${proj.length-1}</b><span>Semestres projetados</span></div>
       <div class="stat"><b>${D.hist.aluno.periodoAtual}º</b><span>Período atual</span></div>
+      <button class="btn btn-sm btn-ghost" id="ver-grafo">🗺️ Grafo de matérias</button>
       <button class="btn btn-sm btn-danger" id="reiniciar">Reiniciar tudo</button>
     </div>
   </div>
@@ -1723,6 +1941,13 @@ async function onClick(e){
   if (t.closest('#ir-app')){ if(!S.preferencias.turnos.length){toast('Selecione ao menos um turno');return;} S.fase='app'; S.abaAtiva=1; salvar(); render(); return; }
   if (t.closest('#voltar-upload')){ S.fase='upload'; render(); return; }
   if (t.closest('#editar-pref')){ S.fase='preferencias'; render(); return; }
+
+  // grafo de matérias
+  if (t.closest('#ver-grafo')){ S.fase='grafo'; salvar(); render(); return; }
+  if (t.closest('#voltar-plano')){ S.fase='app'; salvar(); render(); return; }
+  const gn = t.closest('[data-grafo-node]'); if (gn){ selecionarNoGrafo(gn.dataset.grafoNode); return; }
+  if (t.closest('#grafo-limpar')){ selecionarNoGrafo(null); return; }
+  if (t.closest('#grafo-ajustar')){ if(window.__grafoFit) window.__grafoFit(); return; }
 
   // app
   if (t.closest('#toggle-side')){ S.sidebarCollapsed=!S.sidebarCollapsed; $('#sidebar').classList.toggle('collapsed'); return; }

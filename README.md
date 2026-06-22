@@ -26,6 +26,12 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
   extensão, complementares) — calibrado contra os totais oficiais do histórico
   (1350 h cursadas / 655 h faltantes, etc.).
 - **Cronograma semanal** colorido por área, com bloqueios e disciplinas em rascunho.
+- **Grafo de matérias** (página própria, botão "🗺️ Grafo de matérias"): visualização
+  *force-directed* das **obrigatórias + trilhas** e suas dependências. Cor = área e a borda/ícone
+  indicam o status (concluída ✓ / cursando / disponível / bloqueada). Clique numa matéria para
+  **acender a cadeia de pré-requisitos** (o que vem antes) e o que ela **libera** (o que vem
+  depois), com um painel de detalhes (CH, pré-reqs, semestre planejado). Arraste o fundo para
+  mover, role para zoom e use "Ajustar" para reenquadrar.
 - **Personalização** de grade e **persistência** em `localStorage`.
 
 ## Requisitos atendidos além do spec base
