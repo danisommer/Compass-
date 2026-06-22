@@ -43,16 +43,22 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
   trabalhado) e folgas ajustáveis antes/depois. O app encaixa o trabalho **automaticamente ao
   redor das aulas** da grade escolhida, com **precisão de minutos** (ex.: 09h00–13h30 = 4h30),
   ocupando só parte da célula quando necessário.
-- **Horários de trabalho flexíveis**: ligue *"Seus horários são flexíveis?"* para **variar as
-  horas por dia**. Informe o **horário que prefere trabalhar** (início e fim — ex.: 09h00 às
-  15h00) e o app **calcula e exibe as horas/dia** desejáveis (6h); diga ainda **em quantos dias**
-  aceita variar e **quais dias** prefere flexibilizar. O motor de grades **prioriza o caminho mais vantajoso**,
-  aproveitando a flexibilidade (penaliza grades com déficit de horas ou com aula no núcleo de
-  trabalho), de modo que dias cheios de aula trabalham menos e os demais compensam até o teto.
+- **Intervalo trabalho↔aula (deslocamento)**: defina o **tempo mínimo** que precisa ter entre o
+  fim do trabalho e o início da aula (e vice-versa) — útil para quem estuda de manhã e trabalha à
+  tarde, ou o contrário. O app garante essa folga ao encaixar o trabalho em volta das aulas.
+- **Horários de trabalho flexíveis**: ligue *"Seus horários são flexíveis?"* e informe o
+  **horário que prefere trabalhar** (início e fim — ex.: 09h00 às 15h00); o app **calcula e exibe
+  as horas/dia** (6h). Esse horário é **seguido literalmente** quando possível: dias sem conflito
+  ficam exatamente nele, sem alterações desnecessárias. Quando uma aula corta um dia, **só os dias
+  flexíveis** (você define **quantos** e **quais**) **compensam** — estendem além do preferido
+  apenas o necessário para manter o **total de horas da semana**. O motor de grades **prioriza o
+  caminho mais vantajoso**, preservando ao máximo o seu horário preferido (penaliza grades com
+  déficit de horas, com aula no núcleo de trabalho ou que furam o intervalo de deslocamento).
 - **Configurações de trabalho nomeadas**: salve a configuração atual com um nome (ex.: "Meio
   período", "Integral") e **reaplique-a em qualquer outro semestre** com um clique — útil quando,
-  a partir de certo período, a rotina de trabalho muda. As configurações são globais e ficam
-  disponíveis em todas as abas de semestre.
+  a partir de certo período, a rotina de trabalho muda. As configurações são globais, ficam
+  disponíveis em todas as abas de semestre e **são guardadas numa chave própria do navegador** —
+  sobrevivem ao **"Reiniciar tudo"** (continuam salvas, apenas deixam de estar aplicadas).
 
 ## Desenvolvimento / testes
 O núcleo de parsing e planejamento foi validado em Node contra os 3 PDFs reais

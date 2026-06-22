@@ -316,15 +316,18 @@ const ORDEM_SLOTS = [];
 ['M','T','N'].forEach(p => { const n = p==='N'?5:6; for (let s=1;s<=n;s++) ORDEM_SLOTS.push([p,s]); });
 function hhmmMin(s){ const m=String(s).match(/(\d{1,2})[h:](\d{2})/); return m?(+m[1])*60+(+m[2]):0; }
 function slotTexto(p,s){ const a=SLOTS[p]&&SLOTS[p][s]; return a?`${a[0]}–${a[1]}`:''; }
-/* ---- Trabalho: janela com núcleo obrigatório + flexibilidade ----
-   Modelo: começar entre [inicio, maxComeco] e terminar entre [minFim, fim].
-   Núcleo obrigatório = [maxComeco, minFim] (sempre trabalhado). Horas/semana é o
-   teto fixo; "desejável/dia" é a meta e os dias flexíveis absorvem a diferença. */
+/* ---- Trabalho: horário preferido + flexibilidade ----
+   Janela: começar entre [inicio, maxComeco] e terminar entre [minFim, fim];
+   núcleo obrigatório = [maxComeco, minFim] (sempre trabalhado).
+   O bloco diário é ANCORADO no horário preferido [desejInicio, desejFim] e só muda
+   quando precisa: dias FIXOS ficam no preferido; quando uma aula corta um dia, os
+   dias FLEXÍVEIS (N, preferidos) compensam — estendem além do preferido só o
+   necessário para manter o total semanal w.horas. */
 const DIAS_UTEIS = [2,3,4,5,6];
 const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} em minutos
 for (const [p,s] of ORDEM_SLOTS){ const a=SLOTS[p][s]; SLOT_MIN[p+s]={ ini:hhmmMin(a[0]), fim:hhmmMin(a[1]) }; }
 const DEFAULT_TRAB = { trabalha:false, horas:20, inicio:'08:00', maxComeco:'08:00', minFim:'12:00', fim:'18:00',
-  flexivel:false, desejInicio:'09:00', desejFim:'15:00', diasVariaveis:1, diasPreferidos:[] };
+  flexivel:false, desejInicio:'09:00', desejFim:'15:00', diasVariaveis:1, diasPreferidos:[], folga:0 };
 // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
 function desejHoras(w){ w=normTrab(w); return Math.max(0,(hhmmMin(w.desejFim)-hhmmMin(w.desejInicio))/60); }
 function normTrab(w){ const o=Object.assign({}, DEFAULT_TRAB, w||{}); o.diasPreferidos=Array.isArray(o.diasPreferidos)?o.diasPreferidos.slice():[]; return o; }
@@ -341,53 +344,93 @@ function janelaTrab(w){
 }
 
 // capacidade de trabalho de UM dia, dado os slots de aula desse dia
+// folga = intervalo mínimo (min) entre o trabalho e qualquer aula (deslocamento), nos dois sentidos
 function capacidadeDia(w, slotsAula){
   const J=janelaTrab(w);
+  const gap=Math.max(0,+w.folga||0);
   const aulas=(slotsAula||[]).map(h=>SLOT_MIN[h.periodo+h.slot]).filter(Boolean);
   const coreIni=J.maxIni, coreFim=J.minFim, temCore=coreFim>coreIni;
   let left=J.ini, right=J.fim, coreLivre=true;
   for (const a of aulas){
     if (temCore && a.ini<coreFim && a.fim>coreIni) coreLivre=false;  // aula sobre o núcleo
-    else if (a.fim<=coreIni){ if (a.fim>left) left=a.fim; }          // aula antes do núcleo
-    else { if (a.ini<right) right=a.ini; }                           // aula depois do núcleo
+    else if (a.fim<=coreIni){ if (a.fim+gap>left) left=a.fim+gap; }  // aula antes: começa só após a folga
+    else { if (a.ini-gap<right) right=a.ini-gap; }                   // aula depois: termina antes da folga
   }
-  if (!coreLivre) return { coreLivre:false, capH:0, left, right };
+  // com a folga, o span livre precisa cobrir o núcleo; senão não há como encaixar o trabalho
+  if (temCore && (left>coreIni || right<coreFim)) coreLivre=false;
+  if (!coreLivre || right<=left) return { coreLivre:false, capH:0, left, right };
   return { coreLivre:true, capH:Math.max(0,(right-left)/60), left, right };
 }
 
-// distribui o teto semanal w.horas pelos dias úteis (capPorDia: {dia:horas})
-function alocarTrab(w, capPorDia){
+// análise de UM dia: span livre + encaixe do horário preferido
+function analiseDia(w, slotsAula){
+  const c=capacidadeDia(w, slotsAula);                     // {coreLivre, capH, left, right}
+  const dIni=hhmmMin(w.desejInicio), dFim=hhmmMin(w.desejFim);
+  const pStart=Math.max(dIni, c.left), pEnd=Math.min(dFim, c.right);
+  const prefFitH=Math.max(0,(pEnd-pStart)/60);             // horas do preferido que ficam livres
+  const prefLivre=c.coreLivre && c.left<=dIni && c.right>=dFim;  // preferido inteiro livre de aula
+  return { coreLivre:c.coreLivre, left:c.left, right:c.right, capH:c.capH, prefFitH, prefLivre };
+}
+
+// posiciona um bloco de `durMin` minutos ANCORADO no horário preferido [desejInicio, desejFim]
+function placeBloco(w, J, durMin, info){
+  const dIni=hhmmMin(w.desejInicio), dFim=hhmmMin(w.desejFim), prefDur=Math.max(0,dFim-dIni);
+  const left=info.left, right=info.right;
+  let start, end;
+  if (durMin<=prefDur+1e-6){                               // <= preferido: usa o início preferido, recorta por aula
+    start=Math.max(dIni, left); end=start+durMin;
+    if (end>right){ end=right; start=end-durMin; }
+    if (start<left) start=left;
+  } else {                                                 // > preferido (compensação): mantém o preferido e estende p/ fora
+    start=Math.max(dIni, left); end=Math.min(dFim, right);
+    let need=durMin-(end-start);
+    const addEnd=Math.min(need, Math.max(0, right-end)); end+=addEnd; need-=addEnd;
+    if (need>0){ const addIni=Math.min(need, Math.max(0, start-left)); start-=addIni; need-=addIni; }
+  }
+  if (J.coreH>0){ if (start>J.maxIni) start=J.maxIni; if (end<J.minFim) end=J.minFim; }  // garante o núcleo
+  start=Math.max(left, Math.max(J.ini, start)); end=Math.min(right, Math.min(J.fim, end));
+  return { startMin:start, endMin:end, horas:Math.max(0,(end-start)/60) };
+}
+
+// distribui o total semanal honrando o horário preferido; só os dias flexíveis variam, e só o necessário
+function alocarTrab(w, infoPorDia){
   w=normTrab(w); const J=janelaTrab(w);
-  const horasSem=Math.max(0,+w.horas||0);
-  const dias=DIAS_UTEIS.filter(d=>capPorDia[d]!=null);
+  const alvoSem=Math.max(0,+w.horas||0);
+  const dias=DIAS_UTEIS.filter(d=>infoPorDia[d]!=null);
   const horasPorDia={}; dias.forEach(d=>horasPorDia[d]=0);
-  if (!dias.length || horasSem<=0) return { horasPorDia, deficit:0 };
+  const capH=d=>infoPorDia[d].capH;
+  let conflitosNucleo=0; dias.forEach(d=>{ if(!infoPorDia[d].coreLivre && J.coreH>0) conflitosNucleo++; });
+  if (!dias.length || alvoSem<=0) return { horasPorDia, deficit:0, rigidConf:0, conflitosNucleo };
 
   if (!w.flexivel){                                        // sem flexibilidade: meta igual por dia
-    const alvo=horasSem/dias.length; let deficit=0;
-    dias.forEach(d=>{ horasPorDia[d]=Math.min(alvo,capPorDia[d]); deficit+=Math.max(0,alvo-capPorDia[d]); });
-    return { horasPorDia, deficit };
+    const alvo=alvoSem/dias.length; let deficit=0;
+    dias.forEach(d=>{ horasPorDia[d]=Math.min(alvo,capH(d)); deficit+=Math.max(0,alvo-capH(d)); });
+    return { horasPorDia, deficit, rigidConf:0, conflitosNucleo };
   }
 
-  const desej=Math.max(J.coreH,desejHoras(w));
+  // dias flexíveis (determinístico: preferidos primeiro, depois Seg→Sex)
   const N=Math.max(0,Math.min(dias.length,Math.round(+w.diasVariaveis||0)));
   const pref=(w.diasPreferidos||[]).filter(d=>dias.includes(d));
-  const resto=dias.filter(d=>!pref.includes(d)).sort((a,b)=>capPorDia[b]-capPorDia[a]);
+  const resto=dias.filter(d=>!pref.includes(d));
   const flex=new Set([...pref,...resto].slice(0,N));
-  let usado=0;
-  dias.forEach(d=>{ if(!flex.has(d)){ horasPorDia[d]=Math.min(desej,capPorDia[d]); usado+=horasPorDia[d]; } });
+  const piso=d=>Math.min(J.coreH, capH(d));               // mínimo do dia (núcleo)
+
+  // dias FIXOS: ficam no horário preferido (recortado por aula); aula sobre o preferido = conflito rígido
+  let rigidConf=0;
+  dias.forEach(d=>{ if(!flex.has(d)){ horasPorDia[d]=Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); if(!infoPorDia[d].prefLivre) rigidConf++; } });
+  // dias FLEXÍVEIS: começam no preferido (recortado) e só depois ajustam p/ fechar o total
   const flexDias=dias.filter(d=>flex.has(d));
-  flexDias.forEach(d=>{ horasPorDia[d]=Math.min(J.coreH,capPorDia[d]); usado+=horasPorDia[d]; });
-  let restante=horasSem-usado;
-  const encher=(grupo)=>{ let g=0; while(restante>1e-6 && g++<400){ grupo.sort((a,b)=>(capPorDia[b]-horasPorDia[b])-(capPorDia[a]-horasPorDia[a])); const d=grupo[0]; if(d==null)break; const folga=capPorDia[d]-horasPorDia[d]; if(folga<=1e-6)break; const add=Math.min(folga,restante); horasPorDia[d]+=add; restante-=add; } };
-  if (restante>1e-6) encher(flexDias.slice());
-  if (restante>1e-6) encher(dias.filter(d=>!flex.has(d)));
-  if (restante<-1e-6){                                     // desejável já passou do teto: reduzir até o núcleo
-    let over=-restante,g=0; const ord=dias.slice();
-    while(over>1e-6 && g++<600){ ord.sort((a,b)=>(horasPorDia[b]-J.coreH)-(horasPorDia[a]-J.coreH)); const d=ord[0]; const red=Math.min(horasPorDia[d]-J.coreH,over); if(red<=1e-6)break; horasPorDia[d]-=red; over-=red; }
+  flexDias.forEach(d=>{ horasPorDia[d]=Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); });
+
+  let delta=alvoSem - dias.reduce((a,d)=>a+horasPorDia[d],0);
+  if (delta>1e-6){                                         // faltam horas: estender dias flexíveis além do preferido
+    let g=0; while(delta>1e-6 && g++<800){ flexDias.sort((a,b)=>(capH(b)-horasPorDia[b])-(capH(a)-horasPorDia[a])); const d=flexDias[0]; if(d==null)break; const folga=capH(d)-horasPorDia[d]; if(folga<=1e-6)break; const add=Math.min(folga,delta); horasPorDia[d]+=add; delta-=add; }
+  } else if (delta<-1e-6){                                 // sobram horas: reduzir dias flexíveis (depois fixos), até o núcleo
+    const reduzir=(grupo)=>{ let g=0; while(delta<-1e-6 && g++<800){ grupo.sort((a,b)=>(horasPorDia[b]-piso(b))-(horasPorDia[a]-piso(a))); const d=grupo[0]; if(d==null)break; const red=Math.min(horasPorDia[d]-piso(d), -delta); if(red<=1e-6)break; horasPorDia[d]-=red; delta+=red; } };
+    reduzir(flexDias.slice()); if (delta<-1e-6) reduzir(dias.slice());
   }
   const total=dias.reduce((a,d)=>a+horasPorDia[d],0);
-  return { horasPorDia, deficit:Math.max(0,horasSem-total) };
+  return { horasPorDia, deficit:Math.max(0,alvoSem-total), rigidConf, conflitosNucleo };
 }
 
 // ocupação de aulas por dia útil, a partir de uma seleção (sel[].horarios)
@@ -400,34 +443,29 @@ function ocupacaoPorDia(sel){
 // custo do trabalho p/ uma ocupação (usado no score do motor)
 function custoTrab(w, ocupadoPorDia){
   w=normTrab(w);
-  if (!w.trabalha || !(+w.horas>0)) return { deficit:0, conflitosNucleo:0 };
-  const J=janelaTrab(w); const capPorDia={}; let conflitosNucleo=0;
-  for (const d of DIAS_UTEIS){ const c=capacidadeDia(w,ocupadoPorDia[d]||[]); capPorDia[d]=c.capH; if(!c.coreLivre && J.coreH>0) conflitosNucleo++; }
-  const { deficit }=alocarTrab(w,capPorDia);
-  return { deficit, conflitosNucleo };
+  if (!w.trabalha || !(+w.horas>0)) return { deficit:0, conflitosNucleo:0, rigidConf:0 };
+  const info={}; for (const d of DIAS_UTEIS) info[d]=analiseDia(w, ocupadoPorDia[d]||[]);
+  const { deficit, conflitosNucleo, rigidConf }=alocarTrab(w, info);
+  return { deficit, conflitosNucleo, rigidConf };
 }
 
 // blocos de trabalho calculados p/ uma grade (precisão de minutos) — exibição
 function blocosTrabalhoCalc(w, ocupadoPorDia){
   w=normTrab(w); ocupadoPorDia=ocupadoPorDia||{};
-  const vazio={ intervalos:{}, slots:[], deficit:0, conflitosNucleo:0, horasPorDia:{}, total:0 };
+  const vazio={ intervalos:{}, slots:[], deficit:0, conflitosNucleo:0, rigidConf:0, horasPorDia:{}, total:0 };
   if (!w.trabalha || !(+w.horas>0)) return vazio;
-  const J=janelaTrab(w); const capPorDia={}, info={}; let conflitosNucleo=0;
-  for (const d of DIAS_UTEIS){ const c=capacidadeDia(w,ocupadoPorDia[d]||[]); capPorDia[d]=c.capH; info[d]=c; if(!c.coreLivre && J.coreH>0) conflitosNucleo++; }
-  const { horasPorDia, deficit }=alocarTrab(w,capPorDia);
+  const J=janelaTrab(w); const info={};
+  for (const d of DIAS_UTEIS) info[d]=analiseDia(w, ocupadoPorDia[d]||[]);
+  const { horasPorDia, deficit, conflitosNucleo, rigidConf }=alocarTrab(w, info);
   const intervalos={}, slots=[]; let total=0;
   for (const d of DIAS_UTEIS){
     const horas=horasPorDia[d]||0; if (horas<=1e-6) continue;
-    const dur=horas*60, c=info[d];
-    let start=Math.max(c.left, J.minFim-dur);              // mais cedo possível cobrindo o núcleo
-    if (start>J.maxIni) start=J.maxIni;
-    if (start<c.left) start=c.left;
-    let end=start+dur;
-    if (end>c.right){ end=c.right; start=end-dur; }
-    intervalos[d]={ startMin:start, endMin:end, horas }; total+=horas;
-    for (const [p,s] of ORDEM_SLOTS){ const sm=SLOT_MIN[p+s]; if (start<sm.fim && end>sm.ini) slots.push({diaSemana:d,periodo:p,slot:s,nome:'Trabalho',auto:true}); }
+    const iv=placeBloco(w, J, horas*60, info[d]);
+    if (iv.horas<=1e-6) continue;
+    intervalos[d]=iv; total+=iv.horas;
+    for (const [p,s] of ORDEM_SLOTS){ const sm=SLOT_MIN[p+s]; if (iv.startMin<sm.fim && iv.endMin>sm.ini) slots.push({diaSemana:d,periodo:p,slot:s,nome:'Trabalho',auto:true}); }
   }
-  return { intervalos, slots, deficit, conflitosNucleo, horasPorDia, total };
+  return { intervalos, slots, deficit, conflitosNucleo, rigidConf, horasPorDia, total };
 }
 
 // compat: blocos de trabalho sem grade (janela cheia) — usado como fallback
@@ -821,7 +859,7 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
     let nObr=0, fan=0, nTri=0, nBlk=0;
     for (const s of sel) { if (s.obrig) nObr++; fan += s.fanout; if (s.trilhaRank>0) nTri++; if (s.bloqueado) nBlk++; }
     let penTrab = 0;
-    if (trab){ const ct = custoTrab(trab, ocupacaoPorDia(sel)); penTrab = 12*ct.deficit + 40*ct.conflitosNucleo; }
+    if (trab){ const ct = custoTrab(trab, ocupacaoPorDia(sel)); penTrab = 12*ct.deficit + 40*ct.conflitosNucleo + 25*ct.rigidConf; }
     return 100*nObr + 8*fan + 12*nTri - 40*nBlk - 6*sel.length - penTrab;
   }
   function rec(idx, sel, ocup) {
@@ -915,7 +953,7 @@ const API = { norm, dice, reconstruirLinhas, parseMatriz, parseHistorico, parseG
   TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase,
   ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
   DIAS_UTEIS, DEFAULT_TRAB, normTrab, fmtHHMM, fmtDur, janelaTrab, capacidadeDia,
-  alocarTrab, ocupacaoPorDia, custoTrab, blocosTrabalhoCalc, desejHoras };
+  analiseDia, placeBloco, alocarTrab, ocupacaoPorDia, custoTrab, blocosTrabalhoCalc, desejHoras };
 if (typeof module !== 'undefined' && module.exports) module.exports = API;
 root.Compass = API;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -970,11 +1008,17 @@ function novoEstado(){
     escolhas:{}, custom:{}, manuais:{ estagios:{}, eletiva:{h:0,sem:0}, extensao:{h:0,sem:0}, enade:{done:false,sem:null} },
     abaAtiva:0, sidebarCollapsed:false };
 }
-function salvar(){ try{ const c = structuredClone(S); delete c.files; localStorage.setItem('compass_state', JSON.stringify(c)); }catch(e){console.warn(e);} }
+function salvar(){ try{ const c = structuredClone(S); delete c.files; delete c.trabPresets; localStorage.setItem('compass_state', JSON.stringify(c)); salvarPresets(); }catch(e){console.warn(e);} }
 function carregar(){ try{ const r = localStorage.getItem('compass_state'); if(!r) return null; const o = JSON.parse(r); o.files={matriz:null,historico:null,gnh:null}; if(Array.isArray(o.bloqueios)) o.bloqueios={}; if(!o.trabalho) o.trabalho={}; if(!Array.isArray(o.trabPresets)) o.trabPresets=[];
   for (const k in o.trabalho){ o.trabalho[k] = K.normTrab(o.trabalho[k]); }   // migra estados antigos (campos novos)
   o.trabPresets.forEach(p=>{ p.cfg = K.normTrab(p.cfg); });
   return o; }catch(e){ return null; } }
+// Configurações de trabalho: chave dedicada, durável — sobrevive ao "Reiniciar tudo"
+const PRESETS_KEY='compass_trab_presets';
+function salvarPresets(){ try{ localStorage.setItem(PRESETS_KEY, JSON.stringify(S.trabPresets||[])); }catch(e){} }
+function carregarPresets(){ try{ const r=localStorage.getItem(PRESETS_KEY); if(r==null) return null; const a=JSON.parse(r); return Array.isArray(a)?a.map(p=>({id:p.id,nome:p.nome,cfg:K.normTrab(p.cfg)})):[]; }catch(e){ return null; } }
+// popula S.trabPresets a partir da chave dedicada (ou semeia a chave com o que já houver no estado)
+function hidratarPresets(){ const dk=carregarPresets(); if (dk!==null){ S.trabPresets=dk; } else { S.trabPresets=S.trabPresets||[]; salvarPresets(); } }
 const ORDER = K.ORDEM_SLOTS;                                // [[p,s], ...] ordem vertical
 function manualBlocos(idx){ return (S.bloqueios && S.bloqueios[idx]) || []; }
 function trabDoSem(idx){ return (S.trabalho && S.trabalho[idx]) || null; }
@@ -983,7 +1027,7 @@ function trabCalc(idx, sel){ return K.blocosTrabalhoCalc(trabDoSem(idx), K.ocupa
 function totalBloqueios(){ let n=0; for(const i in (S.bloqueios||{})) n+=S.bloqueios[i].length; return n; }
 
 /* ---- Configurações de trabalho nomeadas (presets, globais) ---- */
-const TRAB_CFG_KEYS = ['horas','inicio','maxComeco','minFim','fim','flexivel','desejInicio','desejFim','diasVariaveis','diasPreferidos'];
+const TRAB_CFG_KEYS = ['horas','inicio','maxComeco','minFim','fim','flexivel','desejInicio','desejFim','diasVariaveis','diasPreferidos','folga'];
 function trabCfgDe(w){ const n=K.normTrab(w); const o={}; TRAB_CFG_KEYS.forEach(k=>o[k]=k==='diasPreferidos'?n[k].slice().sort():n[k]); return o; }
 function mesmaCfgTrab(a,b){ const x=trabCfgDe(a), y=trabCfgDe(b); return TRAB_CFG_KEYS.every(k=>k==='diasPreferidos'?(x[k].join(',')===y[k].join(',')):(x[k]===y[k])); }
 function salvarPresetTrab(idx, nome){ S.trabPresets=S.trabPresets||[]; const cfg=trabCfgDe(trabDoSem(idx)); const ex=S.trabPresets.find(p=>p.nome===nome); if(ex){ ex.cfg=cfg; } else { S.trabPresets.push({ id:'p'+Date.now()+Math.floor(Math.random()*1e4), nome, cfg }); } }
@@ -1315,16 +1359,17 @@ function blocosSemestreHTML(sem){
         <span class="toggle ${w.trabalha?'on':''}" data-trab-toggle="${sem.idx}" style="width:38px;height:22px"><i></i></span></label>
       ${w.trabalha?`
       ${presetsRow}
-      <label>Horas/semana (teto) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
+      <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
       <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${sem.idx}"></label>
       <label>no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${sem.idx}"></label>
       <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${sem.idx}"></label>
       <label>e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${sem.idx}"></label>
+      <label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${sem.idx}"> min</label>
       <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🔁 Seus horários são flexíveis?</span>
         <span class="toggle ${w.flexivel?'on':''}" data-trab-flex="${sem.idx}" style="width:38px;height:22px"><i></i></span>
         <span class="muted">núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})</span></label>
       ${flexFields}
-      <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit>1e-6?` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o teto semanal</span>`:` · <span style="color:var(--success)">teto de ${w.horas}h fechado</span>`}${trab.conflitosNucleo?` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>`:''}</div>
+      <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit>1e-6?` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>`:` · <span style="color:var(--success)">total de ${w.horas}h fechado</span>`}${trab.conflitosNucleo?` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>`:''}${trab.rigidConf?` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>`:''}</div>
       `:''}
     </div>
     <div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você tem horários flexíveis.</div>
@@ -1482,7 +1527,8 @@ function planoSemestreHTML(sem){
   const tw = K.normTrab(trabDoSem(sem.idx)); const tb = sem.trab;
   if (tw.trabalha && (+tw.horas>0) && tb && escolhida.sel.length){
     if (tb.conflitosNucleo>0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>núcleo obrigatório de trabalho</b> em ${sem.rotulo}. ${tw.flexivel?'Mesmo flexível, o núcleo precisa estar livre.':'Ative “horários flexíveis” ou ajuste a janela para encaixar.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
-    else if (tb.deficit>1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o teto de ${tw.horas}h). ${tw.flexivel?'O sistema priorizou as grades que mais aproveitam sua flexibilidade.':'Considere ligar “horários flexíveis” para variar as horas por dia.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+    else if (tb.rigidConf>0) banners.push(`<div class="banner warn">⚠ ${tb.rigidConf} dia(s) <b>não-flexível(is)</b> têm aula sobre o seu horário preferido em ${sem.rotulo}. Marque esse(s) dia(s) como flexível(is) para o trabalho se ajustar, ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+    else if (tb.deficit>1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${tw.horas}h). ${tw.flexivel?'O sistema priorizou as grades que mais aproveitam sua flexibilidade.':'Considere ligar “horários flexíveis” para variar as horas por dia.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
   }
 
   const cards = [...sem.grades.map((g,i)=>gradeCardHTML(g,i,sem)), ...(sem.personalizadas||[]).map((g,i)=>gradeCardHTML(g,'p'+i,sem,true))];
@@ -1657,7 +1703,7 @@ async function onClick(e){
   const t = e.target;
   const pick = t.closest('[data-pick]'); if (pick){ $(`[data-input="${pick.dataset.pick}"]`).click(); return; }
   if (t.closest('#processar')) return processar();
-  if (t.closest('#restaurar')){ S = carregar()||novoEstado(); if(S.fase==='upload')S.fase='upload'; render(); return; }
+  if (t.closest('#restaurar')){ S = carregar()||novoEstado(); hidratarPresets(); if(S.fase==='upload')S.fase='upload'; render(); return; }
 
   // divergências
   const dv = t.closest('[data-div]');
@@ -1680,7 +1726,7 @@ async function onClick(e){
 
   // app
   if (t.closest('#toggle-side')){ S.sidebarCollapsed=!S.sidebarCollapsed; $('#sidebar').classList.toggle('collapsed'); return; }
-  if (t.closest('#reiniciar')){ if(confirm('Reiniciar tudo? Isso apaga o estado salvo e volta para a tela de upload.')){ localStorage.removeItem('compass_state'); S=novoEstado(); render(); } return; }
+  if (t.closest('#reiniciar')){ if(confirm('Reiniciar tudo? Isso apaga o estado salvo e volta para a tela de upload.\n(Suas configurações de trabalho salvas são mantidas.)')){ localStorage.removeItem('compass_state'); S=novoEstado(); hidratarPresets(); salvar(); render(); } return; }
   const tab = t.closest('[data-tab]'); if (tab){ S.abaAtiva=+tab.dataset.tab; salvar(); render(); return; }
   const tc = t.closest('[data-toggle-card]'); if (tc){ tc.closest('.gcard').classList.toggle('open'); return; }
   const ch = t.closest('[data-escolher]'); if (ch) return escolherGrade(ch.dataset.escolher);
@@ -1710,7 +1756,7 @@ function onChange(e){
   if (msem){ const k=msem.dataset.manualsem; if(k==='enade')return; S.manuais[k].sem=+msem.value; salvar(); render(); return; }
   const tr = e.target.closest('[data-trab]');
   if (tr){ const i=+tr.dataset.sem, k=tr.dataset.trab; S.trabalho[i]=K.normTrab(S.trabalho[i]);
-    const numericos = { horas:1, diasVariaveis:1 };
+    const numericos = { horas:1, diasVariaveis:1, folga:1 };
     S.trabalho[i][k] = numericos[k] ? (+tr.value||0) : tr.value; rerenderKeepOpen(); return; }
 }
 
@@ -1879,6 +1925,7 @@ document.addEventListener('drop', e=>{
   if (saved && saved.parsed && saved.parsed.matriz && saved.fase==='app'){ S=saved; }
   else if (saved && saved.parsed && saved.parsed.matriz){ S=saved; }
   else S = novoEstado();
+  hidratarPresets();                                   // configs de trabalho salvas (chave dedicada)
   // se restaurou em fase app, ok; senão começa upload
   if (!S.parsed || !S.parsed.matriz) S.fase='upload';
   render();
