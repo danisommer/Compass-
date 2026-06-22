@@ -116,8 +116,18 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 .blockgrid td.slot{height:22px;cursor:pointer;transition:.1s}
 .blockgrid td.slot:hover{background:var(--surface3)}
 .blockgrid td.slot.blk{background:repeating-linear-gradient(45deg,#3a3550,#3a3550 5px,#2c2840 5px,#2c2840 10px);color:var(--secondary);font-weight:700}
-.blockgrid td.rowlbl{background:var(--surface2);color:var(--muted);font-weight:700;padding:0 6px;font-size:10px}
+.blockgrid td.slot.auto{background:repeating-linear-gradient(45deg,#2b3a52,#2b3a52 5px,#22324a 5px,#22324a 10px);color:#9cc0ff}
+.blockgrid td.slot.selecting{outline:2px solid var(--primary);outline-offset:-2px;background:rgba(79,142,247,.25)!important}
+.blockgrid{cursor:default}
+.blockgrid td.slot{user-select:none}
+.blockgrid td.rowlbl{background:var(--surface2);color:var(--muted);font-weight:700;padding:0 6px;font-size:10px;cursor:help}
 .blockgrid tr.sep td{height:4px;background:var(--bg);border:none}
+.work-form{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:12px 14px;background:var(--surface2);border:1px solid var(--line);border-radius:10px;margin:0 16px 12px;font-size:12px}
+.work-form label{display:flex;align-items:center;gap:6px;color:var(--muted)}
+.work-form input[type=number],.work-form input[type=time]{background:var(--surface);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:5px 7px;font-size:12px;font-family:'JetBrains Mono'}
+.work-form input[type=number]{width:58px}
+.cal td.cell{cursor:default}
+.cal td.tlbl{cursor:help}
 
 /* ---------- App layout ---------- */
 .topbar{height:60px;display:flex;align-items:center;gap:18px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:40}
@@ -297,6 +307,22 @@ const SLOTS = {
   N: { 1:['18h50','19h35'],2:['19h35','20h20'],3:['20h20','21h05'],4:['21h05','21h50'],5:['21h50','22h30'] },
 };
 const DIAS = { 2:'Segunda',3:'Terça',4:'Quarta',5:'Quinta',6:'Sexta',7:'Sábado' };
+// ordem vertical dos slots (M1..M6, T1..T6, N1..N5)
+const ORDEM_SLOTS = [];
+['M','T','N'].forEach(p => { const n = p==='N'?5:6; for (let s=1;s<=n;s++) ORDEM_SLOTS.push([p,s]); });
+function hhmmMin(s){ const m=String(s).match(/(\d{1,2})[h:](\d{2})/); return m?(+m[1])*60+(+m[2]):0; }
+function slotTexto(p,s){ const a=SLOTS[p]&&SLOTS[p][s]; return a?`${a[0]}–${a[1]}`:''; }
+// gera bloqueios de "Trabalho" a partir de carga semanal + janela comercial
+function blocosTrabalho(w){
+  if (!w || !w.trabalha || !w.horas) return [];
+  const ini = hhmmMin(w.inicio || '08:00'), fim = hhmmMin(w.fim || '18:00');
+  const janela = [];
+  for (const [p,s] of ORDEM_SLOTS){ const a=SLOTS[p][s]; const sa=hhmmMin(a[0]), sb=hhmmMin(a[1]); if (sa>=ini && sb<=fim) janela.push({p,s,dur:(sb-sa)/60}); }
+  if (!janela.length) return [];
+  const perDia = w.horas/5; const blocos=[];
+  for (const dia of [2,3,4,5,6]){ let acc=0; for (const sl of janela){ if (acc >= perDia-1e-6) break; blocos.push({diaSemana:dia,periodo:sl.p,slot:sl.s,nome:'Trabalho',auto:true}); acc+=sl.dur; } }
+  return blocos;
+}
 
 /* ---------- Utilidades ---------- */
 function norm(s) {
@@ -774,7 +800,8 @@ function calcularHoras(matriz, cursadasSet, extras) {
 const API = { norm, dice, reconstruirLinhas, parseMatriz, parseHistorico, parseGNH,
   detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis,
   candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado,
-  TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase };
+  TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase,
+  ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho };
 if (typeof module !== 'undefined' && module.exports) module.exports = API;
 root.Compass = API;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -825,14 +852,23 @@ let D = {};            // derivado (não persistido)
 
 function novoEstado(){
   return { fase:'upload', files:{matriz:null,historico:null,gnh:null}, parsed:{matriz:null,historico:null,gnh:null},
-    equivalencias:{}, divergPendentes:[], preferencias:structuredClone(DEFAULT_PREF), bloqueios:{},
-    escolhas:{}, custom:{}, manuais:{ estagios:{}, eletiva:{h:0,sem:null}, extensao:{h:0,sem:null}, enade:{done:false,sem:null} },
+    equivalencias:{}, divergPendentes:[], preferencias:structuredClone(DEFAULT_PREF), bloqueios:{}, trabalho:{},
+    escolhas:{}, custom:{}, manuais:{ estagios:{}, eletiva:{h:0,sem:0}, extensao:{h:0,sem:0}, enade:{done:false,sem:null} },
     abaAtiva:0, sidebarCollapsed:false };
 }
 function salvar(){ try{ const c = structuredClone(S); delete c.files; localStorage.setItem('compass_state', JSON.stringify(c)); }catch(e){console.warn(e);} }
-function carregar(){ try{ const r = localStorage.getItem('compass_state'); if(!r) return null; const o = JSON.parse(r); o.files={matriz:null,historico:null,gnh:null}; if(Array.isArray(o.bloqueios)) o.bloqueios={}; return o; }catch(e){ return null; } }
-function blocosDoSem(idx){ return (S.bloqueios && S.bloqueios[idx]) || []; }
-function totalBloqueios(){ return Object.values(S.bloqueios||{}).reduce((a,x)=>a+(x?x.length:0),0); }
+function carregar(){ try{ const r = localStorage.getItem('compass_state'); if(!r) return null; const o = JSON.parse(r); o.files={matriz:null,historico:null,gnh:null}; if(Array.isArray(o.bloqueios)) o.bloqueios={}; if(!o.trabalho) o.trabalho={}; return o; }catch(e){ return null; } }
+const ORDER = K.ORDEM_SLOTS;                                // [[p,s], ...] ordem vertical
+function manualBlocos(idx){ return (S.bloqueios && S.bloqueios[idx]) || []; }
+function blocosDoSem(idx){                                  // manuais + trabalho (auto), deduplicados
+  const man = manualBlocos(idx);
+  const auto = K.blocosTrabalho(S.trabalho && S.trabalho[idx]);
+  const seen = new Set(man.map(b=>b.diaSemana+b.periodo+b.slot));
+  const out = man.slice();
+  for (const b of auto){ const k=b.diaSemana+b.periodo+b.slot; if(!seen.has(k)){ seen.add(k); out.push(b); } }
+  return out;
+}
+function totalBloqueios(){ let n=0; for(const i in (S.bloqueios||{})) n+=S.bloqueios[i].length; return n; }
 
 /* ---------- Derivação (grafo, ctx) ---------- */
 function derive(){
@@ -884,9 +920,11 @@ function manualNoSem(idx){
 }
 function extrasAteSem(idx){
   const m = S.manuais;
+  const eSem = m.eletiva.sem==null ? 0 : m.eletiva.sem;     // null = conta desde o início
+  const xSem = m.extensao.sem==null ? 0 : m.extensao.sem;
   return {
-    eletivaManual: (m.eletiva.sem!=null && m.eletiva.sem<=idx) ? (m.eletiva.h||0) : 0,
-    extensaoManual:(m.extensao.sem!=null && m.extensao.sem<=idx) ? (m.extensao.h||0) : 0,
+    eletivaManual: (m.eletiva.h>0 && eSem<=idx) ? m.eletiva.h : 0,
+    extensaoManual:(m.extensao.h>0 && xSem<=idx) ? m.extensao.h : 0,
   };
 }
 function cursadasComManuais(baseSet, idx){
@@ -1097,15 +1135,25 @@ function renderPreferencias(){
 }
 
 function blockGridHTML(idx){
-  const blocos = (S.bloqueios && S.bloqueios[idx]) || [];
+  const man = manualBlocos(idx);
+  const auto = K.blocosTrabalho(S.trabalho && S.trabalho[idx]);
+  const manKey = new Set(man.map(b=>b.diaSemana+b.periodo+b.slot));
+  const autoKey = new Set(auto.map(b=>b.diaSemana+b.periodo+b.slot));
   const periods = [['M',6],['T',6],['N',5]];
   let rows = '';
   periods.forEach(([per,n],pi)=>{
     for (let s=1;s<=n;s++){
-      rows += `<tr><td class="rowlbl">${per}${s}</td>`;
+      const ord = K.ORDEM_SLOTS.findIndex(o=>o[0]===per&&o[1]===s);
+      const hora = K.slotTexto(per,s);
+      rows += `<tr><td class="rowlbl" data-tip="${per}${s} · ${hora}">${per}${s}</td>`;
       for (let d=2;d<=7;d++){
-        const blk = blocos.find(b=>b.diaSemana===d&&b.periodo===per&&b.slot===s);
-        rows += `<td class="slot ${blk?'blk':''}" data-sem="${idx}" data-d="${d}" data-p="${per}" data-s="${s}" title="${blk?esc(blk.nome):''}">${blk?esc(blk.nome.slice(0,4)):''}</td>`;
+        const key = d+per+s;
+        const mb = man.find(b=>b.diaSemana===d&&b.periodo===per&&b.slot===s);
+        const isAuto = !mb && autoKey.has(key);
+        const cls = mb ? 'blk' : isAuto ? 'auto' : '';
+        const label = mb ? esc(mb.nome.slice(0,4)) : isAuto ? 'Trab' : '';
+        const tip = `${K.DIAS[d]} ${per}${s} · ${hora}` + (mb?`\\nBloqueio: ${esc(mb.nome)}`:isAuto?`\\nTrabalho (automático)`:'\\n(clique/arraste p/ travar)');
+        rows += `<td class="slot ${cls}" data-sem="${idx}" data-d="${d}" data-p="${per}" data-s="${s}" data-ord="${ord}" data-tip="${tip}">${label}</td>`;
       }
       rows += '</tr>';
     }
@@ -1114,10 +1162,21 @@ function blockGridHTML(idx){
   return `<div class="cal-wrap"><table class="blockgrid"><thead><tr><th></th>${[2,3,4,5,6,7].map(d=>`<th>${K.DIAS[d].slice(0,3)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function blocosSemestreHTML(sem){
-  const n = (S.bloqueios && S.bloqueios[sem.idx] ? S.bloqueios[sem.idx].length : 0);
-  return `<details class="personalize" id="blocos-${sem.idx}" ${n?'open':''} style="margin-top:14px">
-    <summary>🔒 Horários travados de ${esc(sem.rotulo)} <span class="muted" style="font-weight:400;font-size:12px">— específicos deste semestre (${n})</span></summary>
-    <div style="padding:0 16px 8px" class="muted">Clique nas células para travar horários só neste semestre (ex.: trabalho, academia). Disciplinas sobre um bloqueio entram como rascunho.</div>
+  const nMan = (S.bloqueios && S.bloqueios[sem.idx] ? S.bloqueios[sem.idx].length : 0);
+  const w = (S.trabalho && S.trabalho[sem.idx]) || {};
+  const total = blocosDoSem(sem.idx).length;
+  return `<details class="personalize" id="blocos-${sem.idx}" ${total?'open':''} style="margin-top:14px">
+    <summary>🔒 Horários travados de ${esc(sem.rotulo)} <span class="muted" style="font-weight:400;font-size:12px">— específicos deste semestre (${total} bloqueado${total===1?'':'s'})</span></summary>
+    <div class="work-form">
+      <label><span style="color:var(--text);font-weight:600">💼 Você trabalha neste semestre?</span>
+        <span class="toggle ${w.trabalha?'on':''}" data-trab-toggle="${sem.idx}" style="width:38px;height:22px"><i></i></span></label>
+      ${w.trabalha?`
+      <label>Horas/semana <input type="number" min="0" max="44" value="${w.horas||0}" data-trab="horas" data-sem="${sem.idx}"></label>
+      <label>Posso começar às <input type="time" value="${w.inicio||'08:00'}" data-trab="inicio" data-sem="${sem.idx}"></label>
+      <label>e terminar até <input type="time" value="${w.fim||'18:00'}" data-trab="fim" data-sem="${sem.idx}"></label>
+      <span class="muted">→ trava ~${w.horas?Math.round((w.horas/5)*10)/10:0}h/dia (Seg–Sex) na janela comercial</span>`:''}
+    </div>
+    <div style="padding:0 16px 8px" class="muted">Clique numa célula para travar; <b>clique e arraste verticalmente</b> (no mesmo dia) para travar vários horários de uma vez. Disciplinas sobre um bloqueio entram como rascunho. Bloqueios de trabalho (azul) são recalculados pelo formulário acima.</div>
     <div style="padding:0 16px 16px">${blockGridHTML(sem.idx)}</div>
   </details>`;
 }
@@ -1199,6 +1258,7 @@ function sidebarHTML(sem){
 function manuaisHTML(){
   const m = S.manuais;
   const opts = D.projecao.map(s=>`<option value="${s.idx}">${s.rotulo}</option>`).join('');
+  const optsSel = sel => D.projecao.map(s=>`<option value="${s.idx}" ${(+sel===s.idx)?'selected':''}>${s.rotulo}</option>`).join('');
   const estagioRow = (cod,nome) => {
     const done = m.estagios[cod]!=null;
     return `<div class="spread" style="margin-bottom:8px">
@@ -1212,14 +1272,14 @@ function manuaisHTML(){
     ${estagioRow('ICSX51','Estágio 1')}
     ${estagioRow('ICSX52','Estágio 2')}
     <div class="spread" style="margin-bottom:8px">
-      <div><div style="font-size:12px;font-weight:600">Eletivas externas</div><div class="muted" style="font-size:10px">meta 105h</div></div>
+      <div><div style="font-size:12px;font-weight:600">Eletivas externas</div><div class="muted" style="font-size:10px">meta 105h · conta a partir de</div></div>
       <div class="flx"><input type="number" min="0" max="300" value="${m.eletiva.h||0}" data-manualnum="eletiva" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
-      <select data-manualsem="eletiva" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select></div>
+      <select data-manualsem="eletiva" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.eletiva.sem)}</select></div>
     </div>
     <div class="spread" style="margin-bottom:8px">
-      <div><div style="font-size:12px;font-weight:600">Extensão (CCE)</div><div class="muted" style="font-size:10px">faltam 270h</div></div>
+      <div><div style="font-size:12px;font-weight:600">Extensão (CCE)</div><div class="muted" style="font-size:10px">faltam 270h · conta a partir de</div></div>
       <div class="flx"><input type="number" min="0" max="330" value="${m.extensao.h||0}" data-manualnum="extensao" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
-      <select data-manualsem="extensao" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select></div>
+      <select data-manualsem="extensao" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.extensao.sem)}</select></div>
     </div>
     <div class="spread">
       <div><div style="font-size:12px;font-weight:600">ENADE Concluinte</div><div class="muted" style="font-size:10px">requisito de formatura</div></div>
@@ -1342,13 +1402,15 @@ function calendarHTML(sem, sel){
   let rows='';
   periods.forEach(([per,n],pi)=>{
     for (let s=1;s<=n;s++){
-      rows += `<tr><td class="tlbl">${per}${s}</td>`;
+      const hora = K.slotTexto(per,s);
+      rows += `<tr><td class="tlbl" data-tip="${per}${s} · ${hora}">${per}${s}</td>`;
       for (let d=2;d<=7;d++){
+        const quando = `${K.DIAS[d]} ${per}${s} · ${hora}`;
         const e = grid[d+'-'+per+'-'+s];
-        if (!e){ rows += `<td class="cell"></td>`; continue; }
-        if (e.tipo==='blk'){ rows += `<td class="cell"><div class="ev blk" data-tip="Bloqueio: ${esc(e.nome)}">${esc(e.nome.slice(0,10))}</div></td>`; continue; }
+        if (!e){ rows += `<td class="cell" data-tip="${quando}\\n(horário livre)"></td>`; continue; }
+        if (e.tipo==='blk'){ rows += `<td class="cell"><div class="ev blk" data-tip="${quando}\\nBloqueio: ${esc(e.nome)}">${esc(e.nome.slice(0,10))}</div></td>`; continue; }
         const cls = e.rascunho?'rascunho':e.tipo;
-        const tip = `${esc(e.nome)}\\n${esc(e.code)}${e.prof?(' · '+esc(e.prof)):''}\\nSala ${esc(e.sala||'')}${e.rascunho?'\\n⚠ Em conflito com bloqueio':''}`;
+        const tip = `${esc(e.nome)}\\n${esc(e.code)}${e.prof?(' · '+esc(e.prof)):''}\\n${quando}\\nSala ${esc(e.sala||'')}${e.rascunho?'\\n⚠ Em conflito com bloqueio':''}`;
         rows += `<td class="cell"><div class="ev ${cls} ${e.ext?'ext':''}" data-tip="${esc(tip)}">${e.rascunho?'<span class="warn">⚠</span>':''}<div>${esc(e.code)}</div><div class="c">${esc(e.sala||'')}</div></div></td>`;
       }
       rows += '</tr>';
@@ -1421,6 +1483,9 @@ root.addEventListener('click', onClick);
 root.addEventListener('input', onInput);
 root.addEventListener('change', onChange);
 document.addEventListener('mousemove', onTipMove);
+root.addEventListener('mousedown', onDragStart);
+root.addEventListener('mouseover', onDragOver);
+document.addEventListener('mouseup', onDragEnd);
 
 async function onClick(e){
   const t = e.target;
@@ -1436,7 +1501,8 @@ async function onClick(e){
   const pr = t.closest('[data-pref]'); if (pr){ S.preferencias.campusUnico=!S.preferencias.campusUnico; salvar(); renderPreferencias(); return; }
   const cs = t.closest('[data-campus]'); if (cs){ S.preferencias.campus=cs.dataset.campus; salvar(); renderPreferencias(); return; }
   const tu = t.closest('[data-turno]'); if (tu){ const k=tu.dataset.turno; const a=S.preferencias.turnos; const i=a.indexOf(k); if(i>=0){if(a.length>1)a.splice(i,1);}else a.push(k); salvar(); renderPreferencias(); return; }
-  const slot = t.closest('.blockgrid .slot'); if (slot) return toggleBloqueio(slot);
+  const tw = t.closest('[data-trab-toggle]'); if (tw){ const i=+tw.dataset.trabToggle; S.trabalho[i]=S.trabalho[i]||{horas:20,inicio:'08:00',fim:'18:00'}; S.trabalho[i].trabalha=!S.trabalho[i].trabalha; rerenderKeepOpen(); return; }
+  // bloqueio por clique tratado no mousedown/mouseup (suporta arrastar)
   if (t.closest('#ir-app')){ if(!S.preferencias.turnos.length){toast('Selecione ao menos um turno');return;} S.fase='app'; S.abaAtiva=1; salvar(); render(); return; }
   if (t.closest('#voltar-upload')){ S.fase='upload'; render(); return; }
   if (t.closest('#editar-pref')){ S.fase='preferencias'; render(); return; }
@@ -1471,6 +1537,8 @@ function onChange(e){
   if (mnum){ S.manuais[mnum.dataset.manualnum].h = +mnum.value||0; salvar(); render(); return; }
   const msem = e.target.closest('[data-manualsem]');
   if (msem){ const k=msem.dataset.manualsem; if(k==='enade')return; S.manuais[k].sem=+msem.value; salvar(); render(); return; }
+  const tr = e.target.closest('[data-trab]');
+  if (tr){ const i=+tr.dataset.sem, k=tr.dataset.trab; S.trabalho[i]=S.trabalho[i]||{trabalha:true}; S.trabalho[i][k] = k==='horas' ? (+tr.value||0) : tr.value; rerenderKeepOpen(); return; }
 }
 
 /* ---------- Tooltip ---------- */
@@ -1488,16 +1556,50 @@ function onTipMove(e){
 }
 
 /* ---------- Ações ---------- */
-function toggleBloqueio(slot){
-  const idx=+slot.dataset.sem, d=+slot.dataset.d, p=slot.dataset.p, s=+slot.dataset.s;
-  S.bloqueios[idx] = S.bloqueios[idx] || [];
-  const arr = S.bloqueios[idx];
-  const i = arr.findIndex(b=>b.diaSemana===d&&b.periodo===p&&b.slot===s);
-  if (i>=0){ arr.splice(i,1); if(!arr.length) delete S.bloqueios[idx]; }
-  else { const nome=prompt('Nome do bloqueio (ex.: Trabalho, Academia):','Trabalho'); if(nome===null)return; arr.push({diaSemana:d,periodo:p,slot:s,nome:nome||'Bloqueio'}); }
+function rerenderKeepOpen(){
   salvar();
   if (S.fase==='app'){ const open=new Set($$('details.personalize[open]').map(e=>e.id)); render(); open.forEach(id=>{const e=document.getElementById(id); if(e)e.open=true;}); }
-  else renderPreferencias();
+  else render();
+}
+function blocoExiste(idx,d,p,s){ const a=manualBlocos(idx); return a.some(b=>b.diaSemana===d&&b.periodo===p&&b.slot===s); }
+function addBloco(idx,d,p,s,nome){ S.bloqueios[idx]=S.bloqueios[idx]||[]; if(!blocoExiste(idx,d,p,s)) S.bloqueios[idx].push({diaSemana:d,periodo:p,slot:s,nome:nome||'Bloqueio'}); }
+function rmBloco(idx,d,p,s){ const a=S.bloqueios[idx]; if(!a)return; const i=a.findIndex(b=>b.diaSemana===d&&b.periodo===p&&b.slot===s); if(i>=0)a.splice(i,1); if(a&&!a.length)delete S.bloqueios[idx]; }
+
+/* ---- arrastar p/ bloquear (vertical, mesmo dia) ---- */
+let drag = null;
+function onDragStart(e){
+  const slot = e.target.closest('.blockgrid .slot'); if(!slot) return;
+  e.preventDefault();
+  drag = { sem:+slot.dataset.sem, day:+slot.dataset.d, startOrd:+slot.dataset.ord, curOrd:+slot.dataset.ord };
+  pintarSelecao();
+}
+function onDragOver(e){
+  if(!drag) return;
+  const slot = e.target.closest('.blockgrid .slot'); if(!slot) return;
+  if(+slot.dataset.d !== drag.day) return;          // só no mesmo dia (vertical)
+  drag.curOrd = +slot.dataset.ord;
+  pintarSelecao();
+}
+function pintarSelecao(){
+  $$('.blockgrid .slot.selecting').forEach(el=>el.classList.remove('selecting'));
+  if(!drag) return;
+  const lo=Math.min(drag.startOrd,drag.curOrd), hi=Math.max(drag.startOrd,drag.curOrd);
+  $$(`.blockgrid .slot[data-d="${drag.day}"]`).forEach(el=>{ const o=+el.dataset.ord; if(o>=lo&&o<=hi) el.classList.add('selecting'); });
+}
+function onDragEnd(){
+  if(!drag) return;
+  const dr = drag; drag = null;
+  $$('.blockgrid .slot.selecting').forEach(el=>el.classList.remove('selecting'));
+  const lo=Math.min(dr.startOrd,dr.curOrd), hi=Math.max(dr.startOrd,dr.curOrd);
+  if(lo===hi){                                        // clique simples = alternar
+    const [p,s]=ORDER[lo];
+    if(blocoExiste(dr.sem,dr.day,p,s)) rmBloco(dr.sem,dr.day,p,s);
+    else { const nome=prompt('Nome do bloqueio (ex.: Trabalho, Academia):','Bloqueio'); if(nome===null)return; addBloco(dr.sem,dr.day,p,s,nome||'Bloqueio'); }
+  } else {                                            // arrasto = bloqueia o intervalo
+    const nome=prompt('Nome do bloqueio para os horários selecionados:','Bloqueio'); if(nome===null)return;
+    for(let o=lo;o<=hi;o++){ const [p,s]=ORDER[o]; addBloco(dr.sem,dr.day,p,s,nome||'Bloqueio'); }
+  }
+  rerenderKeepOpen();
 }
 
 function escolherGrade(i){
