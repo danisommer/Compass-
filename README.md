@@ -37,9 +37,22 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
 - **Hover revela o horário** de cada célula do cronograma (ex.: T1 → 13h10–14h00).
 - **Travar arrastando**: clique numa célula e arraste **verticalmente** para travar
   vários horários de uma vez — restrito ao mesmo dia (nunca cruza dias).
-- **Bloqueio automático de trabalho por semestre**: informe se trabalha, quantas horas
-  semanais e a janela comercial (horário em que pode começar/terminar); o app trava
-  automaticamente os horários de trabalho daquele semestre.
+- **Bloqueio automático de trabalho por semestre**: informe se trabalha e o **teto de horas
+  semanais**. A janela tem quatro limites — pode **começar a partir de** / **no máximo às** e
+  **terminar no mínimo às** / **no máximo às** — definindo um *núcleo obrigatório* (sempre
+  trabalhado) e folgas ajustáveis antes/depois. O app encaixa o trabalho **automaticamente ao
+  redor das aulas** da grade escolhida, com **precisão de minutos** (ex.: 09h00–13h30 = 4h30),
+  ocupando só parte da célula quando necessário.
+- **Horários de trabalho flexíveis**: ligue *"Seus horários são flexíveis?"* para **variar as
+  horas por dia**. Informe o **horário que prefere trabalhar** (início e fim — ex.: 09h00 às
+  15h00) e o app **calcula e exibe as horas/dia** desejáveis (6h); diga ainda **em quantos dias**
+  aceita variar e **quais dias** prefere flexibilizar. O motor de grades **prioriza o caminho mais vantajoso**,
+  aproveitando a flexibilidade (penaliza grades com déficit de horas ou com aula no núcleo de
+  trabalho), de modo que dias cheios de aula trabalham menos e os demais compensam até o teto.
+- **Configurações de trabalho nomeadas**: salve a configuração atual com um nome (ex.: "Meio
+  período", "Integral") e **reaplique-a em qualquer outro semestre** com um clique — útil quando,
+  a partir de certo período, a rotina de trabalho muda. As configurações são globais e ficam
+  disponíveis em todas as abas de semestre.
 
 ## Desenvolvimento / testes
 O núcleo de parsing e planejamento foi validado em Node contra os 3 PDFs reais
