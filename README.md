@@ -48,7 +48,8 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
   riscadas com o motivo no tooltip), vê o **score recalculado ao vivo**, troca uma matéria
   indisponível por outra (no próximo semestre) e **salva como nova grade personalizada** sem
   alterar a original. Grades personalizadas têm score automático e **persistem** (o “Limpar” só
-  zera o rascunho do editor).
+  zera o rascunho do editor). Enquanto você edita, o **Cronograma semanal vira uma prévia ao vivo**
+  da grade em edição (com destaque); ao fechar, volta a exibir a grade ativa.
 - **Recálculo automático**: ao confirmar/alterar a grade de um semestre — ou mudar trabalho/
   bloqueios — as **escolhas dos semestres seguintes são limpas e recalculadas** automaticamente
   (sem precisar de “Refazer” em cada um).

@@ -1830,6 +1830,7 @@
     .ed-subbox { margin: 6px 0 2px; padding: 8px; background: var(--surface); border: 1px solid var(--secondary); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 6px }
     .ed-sub { font-size: 11px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; background: var(--surface2) }
     .ed-sub:hover { border-color: var(--primary); color: #9cc0ff }
+    .cal-wrap.editando { outline: 2px dashed var(--primary); outline-offset: 3px; border-radius: 8px; box-shadow: 0 0 0 4px rgba(79, 142, 247, .08) }
   </style>
 </head>
 
@@ -2301,11 +2302,17 @@
           const jb = i => i >= 0 && i < bands.length ? bands[i].toks.map(t => t.t).join(' ') : '';
           for (let bi = 0; bi < bands.length; bi++) {
             const b = bands[bi], joined = jb(bi), first = b.toks[0]; if (!first) continue;
-            // cabeçalho de disciplina (pode quebrar em 2+ linhas)
+            // cabeçalho de disciplina. Código/nome/aulas saem da 1ª linha (aceita aulas fracionárias);
+            // o chExt ("horas semestrais") é opcional pois pode ficar na página seguinte (cabeçalho quebra a página).
             if (first.x < 70 && reDisc.test(first.t) && /Aulas\s+semanais/i.test(joined + ' ' + jb(bi + 1))) {
-              let full = joined, j = bi; while (!/extensionistas\)/i.test(full) && j + 1 < bands.length) { j++; full += ' ' + jb(j); }
-              const m2 = full.match(/^([A-Z]{2,5}[0-9][0-9A-Z]{0,2})\s*[-–]\s*(.+?)\s*\((\d+)\s*Aulas semanais presenciais.*?(\d+)\s*horas semestrais/i);
-              if (m2) { disc = { codigo: m2[1], nome: tituloCase(m2[2].replace(/\s+/g, ' ').trim()), aulas: +m2[3], chExt: +m2[4] }; bi = j; continue; }
+              let full = joined, j = bi;
+              while (!/horas semestrais|extensionistas\)/i.test(full) && j + 1 < bands.length && j - bi < 4) { j++; full += ' ' + jb(j); }
+              const m2 = full.match(/^([A-Z]{2,5}[0-9][0-9A-Z]{0,2})\s*[-–]\s*(.+?)\s*\(([\d.,]+)\s*Aulas semanais presenciais/i);
+              if (m2) {
+                const extM = full.match(/([\d.,]+)\s*horas semestrais/i);
+                disc = { codigo: m2[1], nome: tituloCase(m2[2].replace(/\s+/g, ' ').trim()), aulas: Math.round(parseFloat(m2[3].replace(',', '.')) || 0), chExt: extM ? Math.round(parseFloat(extM[1].replace(',', '.')) || 0) : 0 };
+                bi = j; continue;
+              }
             }
             if (/^Turma\b/.test(joined) && /Enquadramento/.test(joined)) continue;   // cabeçalho da tabela
             const isTurma = first.x < 76 && reTurma.test(first.t) && b.toks.some(t => t.x >= 76 && t.x < 160);
@@ -3442,13 +3449,16 @@
       const headAcoes = sem.status === 'confirmado'
         ? `<span class="chip" style="color:var(--success)">confirmado ✓</span> <button class="btn btn-sm btn-ghost" data-desconfirmar="${sem.idx}">Refazer</button>`
         : `<span class="chip">futuro estimado</span>${temGrades ? ` <button class="btn btn-sm btn-primary" data-escolher="0">✓ Confirmar grade sugerida</button>` : ''}`;
+      // cronograma: durante a edição mostra a grade em edição (prévia ao vivo); senão, a grade ativa
+      const calSel = editorAberto ? editorSel(sem) : escolhida.sel;
+      const calSem = editorAberto ? Object.assign({}, sem, { trab: trabCalc(sem.idx, calSel) }) : sem;
       return `
   <div class="sem-head"><h2>${sem.rotulo} ${sem.formatura ? '🎓' : ''}</h2>
     <div class="flx">${headAcoes}</div>
   </div>
   ${banners.join('')}
-  ${escolhida.sel.length ? calendarHTML(sem, escolhida.sel) : ''}
-  ${escolhida.sel.length ? legendaHTML() : ''}
+  ${(calSel.length || editorAberto) ? calendarHTML(calSem, calSel, editorAberto) : ''}
+  ${(calSel.length || editorAberto) ? legendaHTML() : ''}
   ${blocosSemestreHTML(sem)}
   <h3 style="margin:22px 0 6px;font-size:15px">🎲 Grades possíveis ${sem.status === 'confirmado' ? '<span class="muted" style="font-weight:400;font-size:12px">— escolha outra para trocar</span>' : '<span class="muted" style="font-weight:400;font-size:12px">— confirme a sugerida acima ou escolha/edite outra</span>'}</h3>
   ${editorAberto ? editorHTML(sem) : ''}
@@ -3498,7 +3508,7 @@
     }
 
     /* ---------- Cronograma semanal ---------- */
-    function calendarHTML(sem, sel) {
+    function calendarHTML(sem, sel, editando) {
       const grid = {};
       const blocos = sem.bloqueios || [];
       const put = (h, data) => { grid[h.diaSemana + '-' + h.periodo + '-' + h.slot] = data; };
@@ -3544,8 +3554,8 @@
         }
         if (pi < 2) rows += '<tr class="sep"><td colspan="7"></td></tr>';
       });
-      return `<h3 style="margin:22px 0 0;font-size:15px">🗓️ Cronograma semanal</h3>
-  <div class="cal-wrap"><table class="cal"><thead><tr><th></th>${[2, 3, 4, 5, 6, 7].map(d => `<th>${K.DIAS[d]}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
+      return `<h3 style="margin:22px 0 0;font-size:15px">🗓️ Cronograma semanal ${editando ? '<span class="chip" style="color:var(--primary)">✏️ prévia da grade em edição</span>' : ''}</h3>
+  <div class="cal-wrap ${editando ? 'editando' : ''}"><table class="cal"><thead><tr><th></th>${[2, 3, 4, 5, 6, 7].map(d => `<th>${K.DIAS[d]}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     function legendaHTML() {
       const it = [['OBR', 'Obrigatória', 'var(--obr)'], ['HUM', 'Humanidades', 'var(--hum)'], ['OPT', 'Segundo Estrato', 'var(--estrato)'], ['TRI', 'Trilha', 'var(--trilha)'], ['ELE', 'Eletiva', 'var(--elet)'], ['andamento', 'Em andamento', '#39507a']];
@@ -3559,6 +3569,11 @@
     /* ---------- Personalização ---------- */
     /* ---------- Editor de grade (Personalizar / Editar qualquer grade) ---------- */
     function turmasDe(cod, sem) { const c = (sem.candidatas || []).find(x => x.disciplina.codigo === cod); return c ? c.turmas : []; }
+    // seleção atual do editor no formato do cronograma (para a prévia ao vivo)
+    function editorSel(sem) {
+      const ed = S.editor; if (!ed) return [];
+      return ed.codigos.map(cod => { const d = D.byCod.get(cod); const t = turmaDe(cod, ed.turmas[cod]); return { disciplina: d, turma: t, horarios: t ? t.horarios : [], bloqueado: t ? K.bloqueado(t.horarios, sem.bloqueios || []) : false }; }).filter(x => x.disciplina);
+    }
     function editorOcup(sem, exclCod) {
       const ed = S.editor, ocup = [];
       for (const cod of ed.codigos) { if (cod === exclCod) continue; const t = turmaDe(cod, ed.turmas[cod]); if (t) ocup.push(...t.horarios); }
