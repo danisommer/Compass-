@@ -1368,7 +1368,7 @@ function initTrilhasDrag() {
 }
 
 /* ===================================================================
-    Grafo de matérias (obrigatórias + trilhas) — force-directed em SVG
+    Grafo de matérias (todas) — force-directed em SVG
     =================================================================== */
 let GRAFO = null;
 let _grafoFocus = null;   // S10 — matéria a ser focada/selecionada ao abrir o grafo
@@ -1384,8 +1384,7 @@ function grafoCentrarNo(cod) {
 }
 
 function grafoDados() {
-    const incl = d => !d.isOpcional || d.conjuntoOptativo === '1160';     // obrigatórias + trilhas
-    const discs = D.matriz.disciplinas.filter(incl);
+    const discs = D.matriz.disciplinas.slice();   // todas as matérias (obrigatórias, trilhas, 2º estrato, humanidades, eletivas)
     const setCods = new Set(discs.map(d => d.codigo));
     const aprov = D.cursadasBase;
     const andamento = new Set(D.emAndamento);
@@ -1424,6 +1423,14 @@ function layoutForca(g, W, H, iters) {
     g.nodes.forEach(nd => nd._iso = (deg.get(nd.cod) || 0) === 0);
     const sim = g.nodes.filter(nd => !nd._iso);   // só os conectados na simulação de forças
     const ns = sim.length;
+    // componentes conexos: cada sub-grafo desconexo é puxado pelo seu centróide ao centro,
+    // para não escapar para longe do grafo central (só a repulsão evita sobreposição entre eles).
+    const parent = new Map(sim.map(v => [v.cod, v.cod]));
+    const find = x => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+    for (const [a, b] of adj) { const ra = find(a.cod), rb = find(b.cod); if (ra !== rb) parent.set(ra, rb); }
+    const comps = new Map();
+    sim.forEach(v => { const r = find(v.cod); (comps.get(r) || comps.set(r, []).get(r)).push(v); });
+    const multi = comps.size > 1;
     let t = W * 0.10;
     for (let it = 0; it < iters; it++) {
         sim.forEach(v => { v.dx = 0; v.dy = 0; });
@@ -1442,34 +1449,66 @@ function layoutForca(g, W, H, iters) {
         });
         t *= 0.965;
     }
+    if (multi) packComponents(comps, W, H, k);   // aproxima os sub-grafos do grafo central
     placeIsolated(g, k);
 }
 
-// Posiciona cada nó isolado ao lado de um nó conectado da MESMA categoria (cor),
-// distribuído entre os nós da categoria e em leque para fora do centro do grafo.
+// Empacota componentes desconexos: mantém o maior no centro e encosta cada sub-grafo menor
+// logo após o nó perimetral do grafo central na sua direção (gap ~ 1 nó), em ângulos distribuídos.
+function packComponents(comps, W, H, k) {
+    const info = [...comps.values()].map(list => {
+        const cx = list.reduce((a, n) => a + n.x, 0) / list.length, cy = list.reduce((a, n) => a + n.y, 0) / list.length;
+        let r = 0; for (const v of list) r = Math.max(r, Math.hypot(v.x - cx, v.y - cy));
+        return { list, cx, cy, r: r || k * 0.5 };
+    }).sort((a, b) => b.list.length - a.list.length);
+    if (info.length <= 1) return;
+    const cx0 = W / 2, cy0 = H / 2, gap = k * 1.1, N = info.length - 1;
+    const main = info[0];
+    const move = (c, tx, ty) => { const dx = tx - c.cx, dy = ty - c.cy; c.list.forEach(v => { v.x += dx; v.y += dy; }); c.cx = tx; c.cy = ty; };
+    move(main, cx0, cy0);                                  // maior componente no centro
+    for (let i = 1; i < info.length; i++) {
+        const c = info[i], ang = -Math.PI / 2 + (i - 1) * (2 * Math.PI / N), dx = Math.cos(ang), dy = Math.sin(ang);
+        // nó do componente central mais "para fora" nessa direção (perímetro)
+        let proj = -Infinity, px = cx0, py = cy0;
+        for (const v of main.list) { const p = (v.x - cx0) * dx + (v.y - cy0) * dy; if (p > proj) { proj = p; px = v.x; py = v.y; } }
+        move(c, px + dx * (gap + c.r), py + dy * (gap + c.r));   // encosta logo após o nó perimetral
+    }
+}
+
+// Posiciona os nós isolados perto de nós da MESMA categoria (cor):
+//  • categoria COM nós conectados → encosta cada isolado num nó conectado da categoria;
+//  • categoria SEM nós conectados → agrupa todos num bloco compacto, num setor logo fora do grafo
+//    (ex.: Humanidades, que não tem pré-requisitos no grafo) — assim ficam juntos dos seus pares.
 function placeIsolated(g, k) {
     const con = g.nodes.filter(n => !n._iso), iso = g.nodes.filter(n => n._iso);
     if (!iso.length) return;
     const ref = con.length ? con : g.nodes;
     const gx = ref.reduce((a, n) => a + n.x, 0) / ref.length, gy = ref.reduce((a, n) => a + n.y, 0) / ref.length;
+    let R = 0; ref.forEach(n => R = Math.max(R, Math.hypot(n.x - gx, n.y - gy)));
     const byTipo = {}; iso.forEach(n => (byTipo[n.tipo] || (byTipo[n.tipo] = [])).push(n));
+    const semHost = Object.keys(byTipo).filter(tp => !con.some(n => n.tipo === tp));
+    let sector = 0;
     for (const tipo in byTipo) {
         const group = byTipo[tipo];
-        let hosts = con.filter(n => n.tipo === tipo);          // âncoras conectadas da mesma categoria
-        if (!hosts.length) hosts = con.slice();                 // categoria sem conectados → usa o grafo
-        if (!hosts.length) hosts = [{ x: gx, y: gy }];          // grafo vazio → usa o centro
-        const buckets = new Map(hosts.map(h => [h, []]));
-        group.forEach((nd, i) => buckets.get(hosts[i % hosts.length]).push(nd));
-        buckets.forEach((list, h) => {
-            const m = list.length; if (!m) return;
-            let rx = h.x - gx, ry = h.y - gy, rl = Math.hypot(rx, ry) || 1;  // direção radial p/ fora
-            const base = Math.atan2(ry / rl, rx / rl);
-            list.forEach((nd, j) => {
-                const ang = base + (m === 1 ? 0 : (j - (m - 1) / 2) * 0.7);
-                const rad = k * (0.95 + 0.5 * Math.floor(j / 8));            // anéis extras se muitos no mesmo host
-                nd.x = h.x + Math.cos(ang) * rad; nd.y = h.y + Math.sin(ang) * rad;
+        const hosts = con.filter(n => n.tipo === tipo);
+        if (hosts.length) {
+            // encosta cada isolado num nó conectado da mesma categoria (em leque p/ fora do centro)
+            const buckets = new Map(hosts.map(h => [h, []]));
+            group.forEach((nd, i) => buckets.get(hosts[i % hosts.length]).push(nd));
+            buckets.forEach((list, h) => {
+                const m = list.length; if (!m) return;
+                let rx = h.x - gx, ry = h.y - gy, rl = Math.hypot(rx, ry) || 1;
+                const base = Math.atan2(ry / rl, rx / rl);
+                list.forEach((nd, j) => { const ang = base + (m === 1 ? 0 : (j - (m - 1) / 2) * 0.7), rad = k * (0.95 + 0.5 * Math.floor(j / 8)); nd.x = h.x + Math.cos(ang) * rad; nd.y = h.y + Math.sin(ang) * rad; });
             });
-        });
+        } else {
+            // categoria inteira isolada → bloco compacto (grid) num setor logo fora do grafo central
+            const ang = -Math.PI / 2 + sector * (2 * Math.PI / Math.max(1, semHost.length)); sector++;
+            const dx = Math.cos(ang), dy = Math.sin(ang), sp = k * 0.95;
+            const cols = Math.max(1, Math.ceil(Math.sqrt(group.length))), rows = Math.ceil(group.length / cols);
+            const bx = gx + dx * (R + k * 2.2), by = gy + dy * (R + k * 2.2);
+            group.forEach((nd, idx) => { const r = Math.floor(idx / cols), c = idx % cols; nd.x = bx + (c - (cols - 1) / 2) * sp; nd.y = by + (r - (rows - 1) / 2) * sp; });
+        }
     }
 }
 
@@ -1502,7 +1541,7 @@ function grafoEdgeHTML(e) {
 }
 
 function grafoLegendaHTML() {
-    const areas = [['OBR', 'Obrigatória', '--obr'], ['TRI', 'Trilha', '--trilha']];
+    const areas = [['OBR', 'Obrigatória', '--obr'], ['OPT', '2º Estrato', '--estrato'], ['HUM', 'Humanidades', '--hum'], ['TRI', 'Trilha', '--trilha'], ['ELE', 'Eletiva', '--elet']];
     return `<div class="grafo-legend">
 <div><b>Área (cor)</b><div class="row" style="margin-top:4px">${areas.map(([, t, v]) => `<span><i style="background:var(${v})"></i>${t}</span>`).join('')}</div></div>
 <div><b>Status (borda)</b><div class="row" style="margin-top:4px">
@@ -1592,7 +1631,7 @@ function renderGrafo() {
 <button class="btn btn-sm btn-ghost" id="voltar-plano">← Voltar ao planejador</button>
 <div class="logo">C+</div><div class="who">🗺️ Grafo de matérias</div>
 <div class="meta">
-    <span class="muted" style="font-size:12px">${GRAFO.nodes.length} matérias (obrig.+trilhas) · ${cont.concluida || 0} concl. · ${cont.cursando || 0} cursando · ${cont.disponivel || 0} disp. · ${cont.bloqueada || 0} bloq.</span>
+    <span class="muted" style="font-size:12px">${GRAFO.nodes.length} matérias · ${cont.concluida || 0} concl. · ${cont.cursando || 0} cursando · ${cont.disponivel || 0} disp. · ${cont.bloqueada || 0} bloq.</span>
     <button class="btn btn-sm btn-ghost" id="grafo-ajustar">Ajustar</button>
 </div>
 </div>
