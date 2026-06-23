@@ -1,0 +1,2123 @@
+/* ===== Compass+ core (validado) ===== */
+/* ===================================================================
+    Compass+ — Núcleo de parsing e planejamento (testável em Node)
+    Este mesmo código é embutido inline no index.html.
+    =================================================================== */
+(function (root) {
+    'use strict';
+
+    /* ---------- Constantes do curso ---------- */
+    const TRILHA_SUBAREAS = {
+        '1162': 'Gestão de Sistemas de Informação',
+        '1163': 'Interação Humano-Computador',
+        '1164': 'Desenvolvimento Baseado em Plataformas',
+        '1165': 'Banco de Dados',
+        '1166': 'Inteligência Artificial',
+        '1167': 'Processamento Gráfico',
+        '1168': 'Algoritmos e Complexidade',
+        '1169': 'Engenharia de Software',
+        '1170': 'Redes de Computadores',
+        '1171': 'Sistemas Embarcados e Robótica',
+        '1172': 'Linguagens de Programação',
+        '1173': 'Otimização, Mod. Analíticos e Simulação',
+    };
+    const CONJUNTOS = {
+        '1159': { nome: 'Segundo Estrato', pIni: 3, pFim: 6, ch: 360 },
+        '1161': { nome: 'Optativas do Ciclo de Humanidades', pIni: 3, pFim: 6, ch: 135 },
+        '1160': { nome: 'Terceiro Estrato — Trilhas em Computação', pIni: 4, pFim: 8, ch: 345 },
+    };
+    const REQUISITOS = {
+        obrigatorias: 2005,
+        optativas: 840,
+        conj1159: 360,
+        conj1161: 135,
+        trilhas1160: 345,
+        trilhaMin: 90,        // mínimo p/ validar uma subárea
+        trilhasNecessarias: 3,
+        eletivas: 105,
+        extensao: 330,
+        extensaoEmObrig: 60,  // ICSX20
+        complementares: 90,
+    };
+    // Apêndice A — horários
+    const SLOTS = {
+        M: { 1: ['07h30', '08h20'], 2: ['08h20', '09h10'], 3: ['09h10', '10h00'], 4: ['10h20', '11h10'], 5: ['11h10', '12h00'], 6: ['12h00', '12h50'] },
+        T: { 1: ['13h10', '14h00'], 2: ['14h00', '14h50'], 3: ['14h50', '15h40'], 4: ['16h00', '16h50'], 5: ['16h50', '17h40'], 6: ['17h40', '18h30'] },
+        N: { 1: ['18h50', '19h35'], 2: ['19h35', '20h20'], 3: ['20h20', '21h05'], 4: ['21h05', '21h50'], 5: ['21h50', '22h30'] },
+    };
+    const DIAS = { 2: 'Segunda', 3: 'Terça', 4: 'Quarta', 5: 'Quinta', 6: 'Sexta', 7: 'Sábado' };
+    // ordem vertical dos slots (M1..M6, T1..T6, N1..N5)
+    const ORDEM_SLOTS = [];
+    ['M', 'T', 'N'].forEach(p => { const n = p === 'N' ? 5 : 6; for (let s = 1; s <= n; s++) ORDEM_SLOTS.push([p, s]); });
+    function hhmmMin(s) { const m = String(s).match(/(\d{1,2})[h:](\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : 0; }
+    function slotTexto(p, s) { const a = SLOTS[p] && SLOTS[p][s]; return a ? `${a[0]}–${a[1]}` : ''; }
+    /* ---- Trabalho: horário preferido + flexibilidade ----
+        Janela: começar entre [inicio, maxComeco] e terminar entre [minFim, fim];
+        núcleo obrigatório = [maxComeco, minFim] (sempre trabalhado).
+        O bloco diário é ANCORADO no horário preferido [desejInicio, desejFim] e só muda
+        quando precisa: dias FIXOS ficam no preferido; quando uma aula corta um dia, os
+        dias FLEXÍVEIS (N, preferidos) compensam — estendem além do preferido só o
+        necessário para manter o total semanal w.horas. */
+    const DIAS_UTEIS = [2, 3, 4, 5, 6];
+    const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} em minutos
+    for (const [p, s] of ORDEM_SLOTS) { const a = SLOTS[p][s]; SLOT_MIN[p + s] = { ini: hhmmMin(a[0]), fim: hhmmMin(a[1]) }; }
+    const DEFAULT_TRAB = {
+        trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '18:00',
+        flexivel: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
+    };  // trabalha: null = não respondido | true = Sim | false = Não
+    // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
+    function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
+    function normTrab(w) { const o = Object.assign({}, DEFAULT_TRAB, w || {}); o.diasPreferidos = Array.isArray(o.diasPreferidos) ? o.diasPreferidos.slice() : []; return o; }
+    function fmtHHMM(min) { const h = Math.floor(min / 60), m = Math.round(min % 60); return `${String(h).padStart(2, '0')}h${String(m).padStart(2, '0')}`; }
+    function fmtDur(h) { const tot = Math.round(h * 60), hh = Math.floor(tot / 60), mm = tot % 60; return mm ? `${hh}h${String(mm).padStart(2, '0')}` : `${hh}h`; }
+
+    function janelaTrab(w) {
+        w = normTrab(w);
+        let ini = hhmmMin(w.inicio), fim = hhmmMin(w.fim), maxIni = hhmmMin(w.maxComeco), minFim = hhmmMin(w.minFim);
+        if (maxIni < ini) maxIni = ini;
+        if (minFim > fim) minFim = fim;
+        if (minFim < maxIni) minFim = maxIni;                        // núcleo >= 0
+        return { ini, fim, maxIni, minFim, coreH: Math.max(0, (minFim - maxIni) / 60), maxH: Math.max(0, (fim - ini) / 60) };
+    }
+
+    // capacidade de trabalho de UM dia, dado os slots de aula desse dia
+    // folga = intervalo mínimo (min) entre o trabalho e qualquer aula (deslocamento), nos dois sentidos
+    function capacidadeDia(w, slotsAula) {
+        const J = janelaTrab(w);
+        const gap = Math.max(0, +w.folga || 0);
+        const aulas = (slotsAula || []).map(h => SLOT_MIN[h.periodo + h.slot]).filter(Boolean);
+        const coreIni = J.maxIni, coreFim = J.minFim, temCore = coreFim > coreIni;
+        let left = J.ini, right = J.fim, coreLivre = true;
+        for (const a of aulas) {
+            if (temCore && a.ini < coreFim && a.fim > coreIni) coreLivre = false;  // aula sobre o núcleo
+            else if (a.fim <= coreIni) { if (a.fim + gap > left) left = a.fim + gap; }  // aula antes: começa só após a folga
+            else { if (a.ini - gap < right) right = a.ini - gap; }                   // aula depois: termina antes da folga
+        }
+        // com a folga, o span livre precisa cobrir o núcleo; senão não há como encaixar o trabalho
+        if (temCore && (left > coreIni || right < coreFim)) coreLivre = false;
+        if (!coreLivre || right <= left) return { coreLivre: false, capH: 0, left, right };
+        return { coreLivre: true, capH: Math.max(0, (right - left) / 60), left, right };
+    }
+
+    // análise de UM dia: span livre + encaixe do horário preferido
+    function analiseDia(w, slotsAula) {
+        const c = capacidadeDia(w, slotsAula);                     // {coreLivre, capH, left, right}
+        const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim);
+        const pStart = Math.max(dIni, c.left), pEnd = Math.min(dFim, c.right);
+        const prefFitH = Math.max(0, (pEnd - pStart) / 60);             // horas do preferido que ficam livres
+        const prefLivre = c.coreLivre && c.left <= dIni && c.right >= dFim;  // preferido inteiro livre de aula
+        return { coreLivre: c.coreLivre, left: c.left, right: c.right, capH: c.capH, prefFitH, prefLivre };
+    }
+
+    // posiciona um bloco de `durMin` minutos ANCORADO no horário preferido [desejInicio, desejFim]
+    function placeBloco(w, J, durMin, info) {
+        const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim), prefDur = Math.max(0, dFim - dIni);
+        const left = info.left, right = info.right;
+        let start, end;
+        if (durMin <= prefDur + 1e-6) {                               // <= preferido: usa o início preferido, recorta por aula
+            start = Math.max(dIni, left); end = start + durMin;
+            if (end > right) { end = right; start = end - durMin; }
+            if (start < left) start = left;
+        } else {                                                 // > preferido (compensação): mantém o preferido e estende p/ fora
+            start = Math.max(dIni, left); end = Math.min(dFim, right);
+            let need = durMin - (end - start);
+            const addEnd = Math.min(need, Math.max(0, right - end)); end += addEnd; need -= addEnd;
+            if (need > 0) { const addIni = Math.min(need, Math.max(0, start - left)); start -= addIni; need -= addIni; }
+        }
+        if (J.coreH > 0) { if (start > J.maxIni) start = J.maxIni; if (end < J.minFim) end = J.minFim; }  // garante o núcleo
+        start = Math.max(left, Math.max(J.ini, start)); end = Math.min(right, Math.min(J.fim, end));
+        return { startMin: start, endMin: end, horas: Math.max(0, (end - start) / 60) };
+    }
+
+    // distribui o total semanal honrando o horário preferido; só os dias flexíveis variam, e só o necessário
+    function alocarTrab(w, infoPorDia) {
+        w = normTrab(w); const J = janelaTrab(w);
+        const alvoSem = Math.max(0, +w.horas || 0);
+        const dias = DIAS_UTEIS.filter(d => infoPorDia[d] != null);
+        const horasPorDia = {}; dias.forEach(d => horasPorDia[d] = 0);
+        const capH = d => infoPorDia[d].capH;
+        let conflitosNucleo = 0; dias.forEach(d => { if (!infoPorDia[d].coreLivre && J.coreH > 0) conflitosNucleo++; });
+        if (!dias.length || alvoSem <= 0) return { horasPorDia, deficit: 0, rigidConf: 0, conflitosNucleo };
+
+        if (!w.flexivel) {                                        // sem flexibilidade: meta igual por dia
+            const alvo = alvoSem / dias.length; let deficit = 0;
+            dias.forEach(d => { horasPorDia[d] = Math.min(alvo, capH(d)); deficit += Math.max(0, alvo - capH(d)); });
+            return { horasPorDia, deficit, rigidConf: 0, conflitosNucleo };
+        }
+
+        // dias flexíveis (determinístico: preferidos primeiro, depois Seg→Sex)
+        const N = Math.max(0, Math.min(dias.length, Math.round(+w.diasVariaveis || 0)));
+        const pref = (w.diasPreferidos || []).filter(d => dias.includes(d));
+        const resto = dias.filter(d => !pref.includes(d));
+        const flex = new Set([...pref, ...resto].slice(0, N));
+        const piso = d => Math.min(J.coreH, capH(d));               // mínimo do dia (núcleo)
+
+        // dias FIXOS: ficam no horário preferido (recortado por aula); aula sobre o preferido = conflito rígido
+        let rigidConf = 0;
+        dias.forEach(d => { if (!flex.has(d)) { horasPorDia[d] = Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); if (!infoPorDia[d].prefLivre) rigidConf++; } });
+        // dias FLEXÍVEIS: começam no preferido (recortado) e só depois ajustam p/ fechar o total
+        const flexDias = dias.filter(d => flex.has(d));
+        flexDias.forEach(d => { horasPorDia[d] = Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); });
+
+        let delta = alvoSem - dias.reduce((a, d) => a + horasPorDia[d], 0);
+        if (delta > 1e-6) {                                         // faltam horas: estender dias flexíveis além do preferido
+            let g = 0; while (delta > 1e-6 && g++ < 800) { flexDias.sort((a, b) => (capH(b) - horasPorDia[b]) - (capH(a) - horasPorDia[a])); const d = flexDias[0]; if (d == null) break; const folga = capH(d) - horasPorDia[d]; if (folga <= 1e-6) break; const add = Math.min(folga, delta); horasPorDia[d] += add; delta -= add; }
+        } else if (delta < -1e-6) {                                 // sobram horas: reduzir dias flexíveis (depois fixos), até o núcleo
+            const reduzir = (grupo) => { let g = 0; while (delta < -1e-6 && g++ < 800) { grupo.sort((a, b) => (horasPorDia[b] - piso(b)) - (horasPorDia[a] - piso(a))); const d = grupo[0]; if (d == null) break; const red = Math.min(horasPorDia[d] - piso(d), -delta); if (red <= 1e-6) break; horasPorDia[d] -= red; delta += red; } };
+            reduzir(flexDias.slice()); if (delta < -1e-6) reduzir(dias.slice());
+        }
+        const total = dias.reduce((a, d) => a + horasPorDia[d], 0);
+        return { horasPorDia, deficit: Math.max(0, alvoSem - total), rigidConf, conflitosNucleo };
+    }
+
+    // ocupação de aulas por dia útil, a partir de uma seleção (sel[].horarios)
+    function ocupacaoPorDia(sel) {
+        const o = {}; for (const d of DIAS_UTEIS) o[d] = [];
+        for (const s of (sel || [])) for (const h of (s.horarios || [])) if (o[h.diaSemana]) o[h.diaSemana].push({ periodo: h.periodo, slot: h.slot });
+        return o;
+    }
+
+    // custo do trabalho p/ uma ocupação (usado no score do motor)
+    function custoTrab(w, ocupadoPorDia) {
+        w = normTrab(w);
+        if (!w.trabalha || !(+w.horas > 0)) return { deficit: 0, conflitosNucleo: 0, rigidConf: 0 };
+        const info = {}; for (const d of DIAS_UTEIS) info[d] = analiseDia(w, ocupadoPorDia[d] || []);
+        const { deficit, conflitosNucleo, rigidConf } = alocarTrab(w, info);
+        return { deficit, conflitosNucleo, rigidConf };
+    }
+
+    // blocos de trabalho calculados p/ uma grade (precisão de minutos) — exibição
+    function blocosTrabalhoCalc(w, ocupadoPorDia) {
+        w = normTrab(w); ocupadoPorDia = ocupadoPorDia || {};
+        const vazio = { intervalos: {}, slots: [], deficit: 0, conflitosNucleo: 0, rigidConf: 0, horasPorDia: {}, total: 0 };
+        if (!w.trabalha || !(+w.horas > 0)) return vazio;
+        const J = janelaTrab(w); const info = {};
+        for (const d of DIAS_UTEIS) info[d] = analiseDia(w, ocupadoPorDia[d] || []);
+        const { horasPorDia, deficit, conflitosNucleo, rigidConf } = alocarTrab(w, info);
+        const intervalos = {}, slots = []; let total = 0;
+        for (const d of DIAS_UTEIS) {
+            const horas = horasPorDia[d] || 0; if (horas <= 1e-6) continue;
+            const iv = placeBloco(w, J, horas * 60, info[d]);
+            if (iv.horas <= 1e-6) continue;
+            intervalos[d] = iv; total += iv.horas;
+            for (const [p, s] of ORDEM_SLOTS) { const sm = SLOT_MIN[p + s]; if (iv.startMin < sm.fim && iv.endMin > sm.ini) slots.push({ diaSemana: d, periodo: p, slot: s, nome: 'Trabalho', auto: true }); }
+        }
+        return { intervalos, slots, deficit, conflitosNucleo, rigidConf, horasPorDia, total };
+    }
+
+    // compat: blocos de trabalho sem grade (janela cheia) — usado como fallback
+    function blocosTrabalho(w) { return blocosTrabalhoCalc(w, {}).slots; }
+
+    /* ---------- Utilidades ---------- */
+    function norm(s) {
+        return (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '')
+            .toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function dice(a, b) {                       // similaridade de bigramas (0..1)
+        a = norm(a); b = norm(b);
+        if (a === b) return 1;
+        if (a.length < 2 || b.length < 2) return 0;
+        const bg = s => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; };
+        const A = bg(a), B = bg(b); let inter = 0, total = 0;
+        A.forEach((c, g) => { total += c; if (B.has(g)) inter += Math.min(c, B.get(g)); });
+        B.forEach(c => total += c);
+        return (2 * inter) / total;
+    }
+    const reCodigo = /^[A-Z]{2,5}[0-9][0-9A-Z]{0,2}$/;   // ICSD20, MAT7C1, ICSHX0, ELEW40...
+    function isCodigo(t) { return reCodigo.test(t) && /[0-9]/.test(t) && t.length >= 5 && t.length <= 6; }
+
+    /* ===================================================================
+        Reconstrução geométrica de linhas (idêntica no browser via PDF.js)
+        pages: [{ h, items:[{str,x,yTop,w,h}] }]   (yTop cresce p/ baixo)
+        -> retorna [ [ {t,x} ... ]  (linha)  ... ] achatado de todas as páginas
+        =================================================================== */
+    function reconstruirLinhas(pages, xMax) {
+        const linhas = [];
+        for (const pg of pages) {
+            const its = pg.items.filter(it => it.str && it.str.trim() !== '' && (xMax == null || it.x < xMax));
+            const bandas = [];
+            for (const it of its) {
+                const ymid = it.yTop + (it.h || 0) / 2;
+                let b = bandas.find(x => Math.abs(x.y - ymid) <= 3.2);
+                if (!b) { b = { y: ymid, toks: [] }; bandas.push(b); }
+                b.toks.push({ t: it.str, x: it.x });
+            }
+            bandas.sort((a, b) => a.y - b.y);
+            for (const b of bandas) { b.toks.sort((p, q) => p.x - q.x); linhas.push(b.toks); }
+        }
+        return linhas;
+    }
+
+    /* ===================================================================
+        PARSER 1 — Matriz Curricular
+        =================================================================== */
+    function parseMatriz(pages) {
+        const linhas = reconstruirLinhas(pages);
+        const disciplinas = [];
+        const isHeader = toks => toks[0] && /^(Período|PER|\[OPT\])$/.test(toks[0].t);
+
+        for (let i = 0; i < linhas.length; i++) {
+            const toks = linhas[i];
+            if (!toks.length || isHeader(toks)) continue;
+            if (!/^[1-8]$/.test(toks[0].t)) continue;
+
+            // conjunto + código
+            let conjuntoRaw = null, codeIdx = 1;
+            if (toks[1] && /^\[(\d{4})\]$/.test(toks[1].t)) { conjuntoRaw = toks[1].t.slice(1, 5); codeIdx = 2; }
+            if (!toks[codeIdx] || !isCodigo(toks[codeIdx].t)) continue;
+            const codigo = toks[codeIdx].t;
+
+            // localizar a corrida de 9 inteiros (CH) — pulando pré-reqs / lixo à direita
+            const arr = toks.map(t => t.t);
+            let j = arr.length - 1;
+            const prereqLinha = [];
+            while (j > codeIdx && !/^\d+$/.test(arr[j])) { if (isCodigo(arr[j])) prereqLinha.push(arr[j]); j--; }
+            const nums = [];
+            while (j > codeIdx && /^\d+$/.test(arr[j])) { nums.unshift(parseInt(arr[j], 10)); j--; }
+            if (nums.length < 9) continue;                          // não é linha de disciplina
+            const ch = nums.slice(nums.length - 9);                 // 9 campos de CH
+            const runStart = j + 1 + (nums.length - 9);
+            const modeloX = toks[runStart - 1] ? toks[runStart - 1].x : 1e9;
+            const nameFirstIdx = codeIdx + 1;
+            const nameStartX = toks[nameFirstIdx] ? toks[nameFirstIdx].x : modeloX;
+            const codeX = toks[codeIdx].x;
+            const midName = (codeX + nameStartX) / 2;
+            const midMod = (nameStartX + modeloX) / 2;
+
+            // linha-início: separa nome × modelo pela coluna (x), não pela posição
+            const nomeToks = [], modeloToks = [];
+            for (let k = nameFirstIdx; k < runStart; k++) {
+                const tk = toks[k];
+                if (tk.x < midMod) nomeToks.push(tk.t); else modeloToks.push(tk.t);
+            }
+
+            // continuação nas linhas seguintes (nome/modelo por coluna; pára no rodapé/próxima disc.)
+            const prereqs = prereqLinha.slice();
+            const footerRe = /^(CÂMPUS|MATRIZ|STATUS|CURSO|CHT|SOMA|TEMA|TIPO|Legenda|Optativas|Detalhes|Eletiva|Período|Pré|\*)/i;
+            let contLines = 0;
+            for (let n = i + 1; n < linhas.length && contLines < 6; n++) {
+                const ln = linhas[n];
+                if (!ln.length) continue;
+                if (isHeader(ln)) break;
+                if (footerRe.test(ln.map(t => t.t).join(' '))) break;
+                if (/^[1-8]$/.test(ln[0].t)) {                        // possível próxima disciplina
+                    const hasRun = ln.map(t => t.t).filter(s => /^\d+$/.test(s)).length >= 9;
+                    const c = (ln[1] && /^\[(\d{4})\]$/.test(ln[1].t)) ? 2 : 1;
+                    if (hasRun && ln[c] && isCodigo(ln[c].t)) break;
+                }
+                contLines++;
+                for (const tk of ln) {
+                    if (isCodigo(tk.t)) { if (tk.x > midMod) prereqs.push(tk.t); continue; }
+                    if (tk.t === 'Turmas' || tk.t === 'horas') continue;
+                    if (tk.x >= midName && tk.x < midMod) nomeToks.push(tk.t);      // inclui dígitos do nome
+                    else if (tk.x >= midMod && !/^\d+$/.test(tk.t)) modeloToks.push(tk.t);
+                }
+            }
+
+            const modelo = modeloToks.join(' ');
+            let conjuntoOptativo = null, subAreaTrilha = null;
+            if (conjuntoRaw) {
+                if (TRILHA_SUBAREAS[conjuntoRaw]) { conjuntoOptativo = '1160'; subAreaTrilha = conjuntoRaw; }
+                else if (conjuntoRaw === '1159' || conjuntoRaw === '1161') conjuntoOptativo = conjuntoRaw;
+                else conjuntoOptativo = conjuntoRaw;
+            }
+            if (disciplinas.some(d => d.codigo === codigo)) continue;   // evita duplicatas
+            disciplinas.push({
+                codigo,
+                nome: tituloCase(nomeToks.join(' ')),
+                periodoSugerido: parseInt(toks[0].t, 10),
+                chTotal: ch[8],
+                chSemanal: ch[2],
+                chExt: ch[6],
+                modeloDisciplina: modelo,
+                preRequisitos: [...new Set(prereqs)],
+                conjuntoOptativo,
+                subAreaTrilha,
+                isOpcional: conjuntoOptativo != null,
+            });
+        }
+
+        const conjuntosOptativos = [];
+        for (const id of Object.keys(CONJUNTOS)) {
+            const c = CONJUNTOS[id];
+            conjuntosOptativos.push({
+                id, nome: c.nome, periodoInicial: c.pIni, periodoFinal: c.pFim, chObrigatoria: c.ch,
+                disciplinas: disciplinas.filter(d => (id === '1160' ? d.conjuntoOptativo === '1160' : d.conjuntoOptativo === id)).map(d => d.codigo),
+            });
+        }
+        return {
+            disciplinas,
+            resumo: {
+                chObrigatoriaTotal: REQUISITOS.obrigatorias,
+                chOptativasTotal: REQUISITOS.optativas,
+                chExtensaoTotal: REQUISITOS.extensao,
+                chEletivaTotal: REQUISITOS.eletivas,
+                conjuntosOptativos,
+            },
+            subareas: TRILHA_SUBAREAS,
+        };
+    }
+    function tituloCase(s) {
+        return (s || '').toLowerCase().replace(/\b([a-zà-ú0-9])([a-zà-ú0-9]*)/g, (m, a, b) => a.toUpperCase() + b)
+            .replace(/\b(De|Da|Do|Das|Dos|E|A|Ao|Em|Para|À)\b/g, w => w.toLowerCase())
+            .replace(/^./, c => c.toUpperCase());
+    }
+
+    /* ===================================================================
+        PARSER 2 — Histórico Escolar
+        =================================================================== */
+    const SIT_PRIO = { APROVADO: 5, CREDITO_CONSIGNADO: 5, CURSANDO: 3, REPROVADO: 2, CANCELADO: 1 };
+    function parseHistorico(pages) {
+        const linhas = reconstruirLinhas(pages);
+        const texto = linhas.map(l => l.map(t => t.t).join(' '));
+
+        const head = texto.slice(0, 25).join('\n');
+        const get = re => { const m = head.match(re); return m ? m[1].trim() : ''; };
+        const aluno = {
+            matricula: get(/Aluno:\s*(\d+)/),
+            nome: tituloCase(get(/Aluno:\s*\d+\s*-\s*([^\n]+)/).split(/\s+Identidade/i)[0]),
+            curso: get(/Curso:\s*([^\n]+)/),
+            periodoAtual: parseInt(get(/Período:\s*(\d+)/) || '1', 10),
+            matriz: get(/Matriz:\s*([^\n]+)/),
+            coeficienteAbsoluto: parseFloat((get(/Coeficiente absoluto:\s*([\d,]+)/) || '0').replace(',', '.')),
+            coeficienteNormalizado: parseFloat((get(/Coeficiente normalizado:\s*([\d,]+)/) || '0').replace(',', '.')),
+        };
+
+        // Linhas-âncora: dígito período + código + contém ano 20xx
+        const anchors = [];
+        for (let i = 0; i < linhas.length; i++) {
+            const toks = linhas[i];
+            if (toks.length < 4) continue;
+            if (!/^[1-8]$/.test(toks[0].t)) continue;
+            if (!isCodigo(toks[1].t)) continue;
+            if (!toks.some(t => /^20\d\d$/.test(t.t))) continue;
+            anchors.push(i);
+        }
+        const registros = new Map();
+        const setReg = (cod, sit, extra) => {
+            const prev = registros.get(cod);
+            if (!prev || (SIT_PRIO[sit] || 0) >= (SIT_PRIO[prev.situacao] || 0))
+                registros.set(cod, Object.assign({ codigo: cod, situacao: sit }, prev, extra, { situacao: sit }));
+        };
+        for (let a = 0; a < anchors.length; a++) {
+            const Li = anchors[a];
+            const toks = linhas[Li];
+            const codigo = toks[1].t;
+            const arr = toks.map(t => t.t);
+            const yi = arr.findIndex(t => /^20\d\d$/.test(t));
+            const ano = parseInt(arr[yi], 10);
+            const semestre = parseInt(arr[yi - 1], 10) || null;
+            // janela do registro: da âncora anterior+1 até esta âncora
+            const ini = a === 0 ? 0 : anchors[a - 1] + 1;
+            let blob = '';
+            for (let k = ini; k <= Li; k++) blob += ' ' + texto[k];
+            blob = norm(blob);
+            let sit = 'APROVADO';
+            if (/CANCELADO/.test(blob)) sit = 'CANCELADO';
+            else if (/REPROVADO/.test(blob)) sit = 'REPROVADO';
+            else if (/APROVADO/.test(blob)) sit = 'APROVADO';
+            else if (/CONSIGNADO/.test(blob)) sit = 'CREDITO_CONSIGNADO';
+            setReg(codigo, sit, { ano, semestre });
+        }
+
+        // Matriculadas 2026/1 (CURSANDO)
+        const matIdx = texto.findIndex(t => /Matriculadas/.test(t));
+        if (matIdx >= 0) {
+            for (let k = matIdx + 1; k < linhas.length; k++) {
+                const toks = linhas[k];
+                const arr = toks.map(t => t.t);
+                if (arr.join(' ').match(/Exame De Curso|ENADE|Vínculos|Bloqueios/i)) break;
+                if (toks.length && isCodigo(toks[0].t) && arr.some(t => /Cursando/i.test(t))) {
+                    const turma = (arr.find(t => /^[A-Z]\d{2}$/.test(t)) || '');
+                    setReg(toks[0].t, 'CURSANDO', { turma });
+                }
+            }
+        }
+
+        // ENADE
+        const full = texto.join('\n');
+        const enadeConcluinte = /CONCLUINTE[\s\S]{0,40}Sem Registro/i.test(full) ? false : /CONCLUINTE[\s\S]{0,80}(Aprovado|Dispensado|Realiz)/i.test(full);
+
+        const cursadas = [...registros.values()];
+        const cursadasAprovadas = cursadas.filter(d => d.situacao === 'APROVADO' || d.situacao === 'CREDITO_CONSIGNADO').map(d => d.codigo);
+        const emAndamento = cursadas.filter(d => d.situacao === 'CURSANDO').map(d => d.codigo);
+
+        return { aluno, cursadas, cursadasAprovadas, emAndamento, enadeConcluinte };
+    }
+
+    /* ===================================================================
+        PARSER 3b — Turmas Abertas (Portal do Aluno) — substitui o Grade na Hora.
+        Tabela por coluna (x): Turma<76 | Enquadr.<160 | Vagas<241 | Reserva<285 |
+        Prioridade<344 | Horário<434 | Professor<490 | Optativa(equivalências).
+        Saída compatível com a oferta usada no app + prioridadeSI/reserva.
+        =================================================================== */
+    function parseTurmasAbertas(pages) {
+        const reDisc = /^[A-Z]{2,5}[0-9][0-9A-Z]{0,2}$/, reTurma = /^[A-Z]{1,2}[0-9]{2,3}$/;
+        const ALVO = norm('Sist De Informação');
+        const turmas = []; let disc = null;
+        for (const pg of pages) {
+            const its = pg.items.filter(i => i.str && i.str.trim());
+            const bands = [];
+            for (const it of its) { const ym = it.yTop + (it.h || 0) / 2; let b = bands.find(x => Math.abs(x.y - ym) <= 3.2); if (!b) { b = { y: ym, toks: [] }; bands.push(b); } b.toks.push({ t: it.str, x: it.x, y: it.yTop }); }
+            bands.sort((a, b) => a.y - b.y); bands.forEach(b => b.toks.sort((p, q) => p.x - q.x));
+            const jb = i => i >= 0 && i < bands.length ? bands[i].toks.map(t => t.t).join(' ') : '';
+            for (let bi = 0; bi < bands.length; bi++) {
+                const b = bands[bi], joined = jb(bi), first = b.toks[0]; if (!first) continue;
+                // cabeçalho de disciplina. Código/nome/aulas saem da 1ª linha (aceita aulas fracionárias);
+                // o chExt ("horas semestrais") é opcional pois pode ficar na página seguinte (cabeçalho quebra a página).
+                if (first.x < 70 && reDisc.test(first.t) && /Aulas\s+semanais/i.test(joined + ' ' + jb(bi + 1))) {
+                    let full = joined, j = bi;
+                    while (!/horas semestrais|extensionistas\)/i.test(full) && j + 1 < bands.length && j - bi < 4) { j++; full += ' ' + jb(j); }
+                    const m2 = full.match(/^([A-Z]{2,5}[0-9][0-9A-Z]{0,2})\s*[-–]\s*(.+?)\s*\(([\d.,]+)\s*Aulas semanais presenciais/i);
+                    if (m2) {
+                        const extM = full.match(/([\d.,]+)\s*horas semestrais/i);
+                        disc = { codigo: m2[1], nome: tituloCase(m2[2].replace(/\s+/g, ' ').trim()), aulas: Math.round(parseFloat(m2[3].replace(',', '.')) || 0), chExt: extM ? Math.round(parseFloat(extM[1].replace(',', '.')) || 0) : 0 };
+                        bi = j; continue;
+                    }
+                }
+                if (/^Turma\b/.test(joined) && /Enquadramento/.test(joined)) continue;   // cabeçalho da tabela
+                const isTurma = first.x < 76 && reTurma.test(first.t) && b.toks.some(t => t.x >= 76 && t.x < 160);
+                if (isTurma && disc) {
+                    const blockBands = [b]; let k = bi + 1;
+                    for (; k < bands.length; k++) {
+                        const nb = bands[k], nf = nb.toks[0], nj = jb(k); if (!nf) continue;
+                        const nT = nf.x < 76 && reTurma.test(nf.t) && nb.toks.some(t => t.x >= 76 && t.x < 160);
+                        const nD = nf.x < 70 && reDisc.test(nf.t) && /Aulas\s+semanais/i.test(nj + ' ' + jb(k + 1));
+                        const nH = /^Turma\b/.test(nj) && /Enquadramento/.test(nj);
+                        if (nT || nD || nH) break; blockBands.push(nb);
+                    }
+                    bi = k - 1;
+                    const col = { enq: [], res: [], pri: [], hor: [], prof: [], opt: [] }, turmaCod = first.t;
+                    for (const bb of blockBands) for (const tk of bb.toks) {
+                        const x = tk.x;
+                        if (x < 76) { } else if (x < 160) col.enq.push(tk); else if (x < 241) { } else if (x < 285) col.res.push(tk);
+                        else if (x < 344) col.pri.push(tk); else if (x < 434) col.hor.push(tk); else if (x < 490) col.prof.push(tk); else col.opt.push(tk);
+                    }
+                    const jc = a => a.slice().sort((p, q) => (p.y - q.y) || (p.x - q.x)).map(t => t.t).join(' ').replace(/\s+/g, ' ').trim();
+                    const enq = jc(col.enq), reserva = jc(col.res), priText = jc(col.pri), horText = jc(col.hor), prof = tituloCase(jc(col.prof)), optText = jc(col.opt);
+                    const prios = []; const re = /(\d+)\s*-\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .]*?)(?=\s+\d+\s*-\s*|$)/g; let mp;
+                    while ((mp = re.exec(priText))) prios.push({ rank: +mp[1], curso: mp[2].replace(/\s+/g, ' ').trim() });
+                    let prioridadeSI = null; for (const p of prios) { const n = norm(p.curso); if (n === ALVO || n.startsWith('SIST DE INFORM')) { prioridadeSI = p.rank; break; } }
+                    const horarios = [], seen = new Set(); let campus = 'CURITIBA';
+                    const sr = /(\d)([MTN])(\d)\((\*{0,2})([A-Za-z0-9-]+)\)/g; let sm;
+                    while ((sm = sr.exec(horText))) { const dia = +sm[1], per = sm[2], slot = +sm[3], ast = sm[4], sala = sm[5]; if (ast) campus = ast === '**' ? 'NEOVILLE' : 'ECOVILLE'; const key = dia + per + slot; if (seen.has(key)) continue; seen.add(key); horarios.push({ diaSemana: dia, periodo: per, slot, sala }); }
+                    const elegivel = !/fechada/i.test(reserva) || prioridadeSI != null;   // pode cursar? (Fechada exige SI na prioridade)
+                    turmas.push({ codigo: disc.codigo, nome: disc.nome, turma: turmaCod, professor: prof, aulasSem: disc.aulas, horarios, campus, enquadramento: enq, reserva, prioridadeSI, prioridades: prios, elegivel, optativaMatrizes: (optText.match(/Matriz:\d+/g) || []) });
+                    continue;
+                }
+            }
+        }
+        return turmas;
+    }
+
+    /* ===================================================================
+        Equivalências GNH↔Matriz + divergências
+        =================================================================== */
+    function detectarEquivalencias(matriz, gnh) {
+        const mCods = new Set(matriz.disciplinas.map(d => d.codigo));
+        const auto = {}; const divergencias = [];
+        const gnhCods = [...new Set(gnh.map(t => t.codigo))];
+        for (const gc of gnhCods) {
+            if (mCods.has(gc)) continue;
+            if (mCods.has('I' + gc)) { auto[gc] = 'I' + gc; continue; }   // CSX41 -> ICSX41
+            const nome = (gnh.find(t => t.codigo === gc) || {}).nome || '';
+            let best = null, bestS = 0;
+            for (const d of matriz.disciplinas) {
+                const s = dice(nome, d.nome);
+                if (s > bestS) { bestS = s; best = d; }
+            }
+            if (best && bestS >= 0.9) divergencias.push({ gnhCod: gc, gnhNome: nome, matrizCod: best.codigo, matrizNome: best.nome, score: bestS });
+        }
+        return { auto, divergencias };
+    }
+
+    /* ===================================================================
+        Grafo de dependências + Motor de planejamento
+        =================================================================== */
+    function construirGrafo(disciplinas) {
+        const grafo = new Map();
+        const byCod = new Map(disciplinas.map(d => [d.codigo, d]));
+        for (const d of disciplinas) if (!grafo.has(d.codigo)) grafo.set(d.codigo, { in: new Set(), out: new Set() });
+        for (const d of disciplinas)
+            for (const p of d.preRequisitos)
+                if (byCod.has(p)) { grafo.get(d.codigo).in.add(p); grafo.get(p).out.add(d.codigo); }
+        return grafo;
+    }
+    function getDisponiveis(grafo, cursadas) {
+        const out = [];
+        grafo.forEach((v, cod) => { let ok = true; v.in.forEach(p => { if (!cursadas.has(p)) ok = false; }); if (ok && !cursadas.has(cod)) out.push(cod); });
+        return out;
+    }
+    function getDesbloqueaveis(grafo, codigo, cursadas) {
+        const v = grafo.get(codigo); if (!v) return [];
+        const futuras = new Set([...cursadas, codigo]);
+        const out = [];
+        v.out.forEach(nx => { const w = grafo.get(nx); let ok = true; w.in.forEach(p => { if (!futuras.has(p)) ok = false; }); if (ok && !cursadas.has(nx)) out.push(nx); });
+        return out;
+    }
+    // fecho transitivo de descendentes: todas as matérias que dependem (direta/indiretamente) de cada código.
+    // Memoizado; assume grafo acíclico (com guarda contra ciclos por garantia).
+    function descendentesTransitivos(grafo) {
+        const memo = new Map();
+        const dfs = (cod, pilha) => {
+            if (memo.has(cod)) return memo.get(cod);
+            const acc = new Set(); const v = grafo.get(cod);
+            if (v) v.out.forEach(nx => { if (pilha.has(nx)) return; acc.add(nx); pilha.add(nx); dfs(nx, pilha).forEach(x => acc.add(x)); pilha.delete(nx); });
+            memo.set(cod, acc); return acc;
+        };
+        grafo.forEach((_, cod) => { if (!memo.has(cod)) dfs(cod, new Set([cod])); });
+        return memo;
+    }
+
+    function conflita(hA, hB) {
+        for (const a of hA) for (const b of hB) if (a.diaSemana === b.diaSemana && a.periodo === b.periodo && a.slot === b.slot) return true;
+        return false;
+    }
+    function bloqueado(horarios, bloqueios) {
+        for (const h of horarios) for (const b of bloqueios) if (h.diaSemana === b.diaSemana && h.periodo === b.periodo && h.slot === b.slot) return true;
+        return false;
+    }
+
+    /* Candidatas (disciplina + turmas viáveis) para um semestre */
+    function candidatasSemestre(ctx, cursadas, emAndamento, usarGNH) {
+        const { matrizByCod, grafo, gnhByCod, equiv, pref } = ctx;
+        const disp = new Set(getDisponiveis(grafo, cursadas));
+        const cand = [];
+        disp.forEach(cod => {
+            if (emAndamento.has(cod)) return;
+            const d = matrizByCod.get(cod); if (!d) return;
+            if (/^(ENADE|ESTÁGIO)/.test(d.modeloDisciplina) && d.chSemanal === 0) { /* estágio sem aula */ }
+            let turmasViaveis = (gnhByCod.get(cod) || []);
+            if (usarGNH) {
+                turmasViaveis = turmasViaveis.filter(t => {
+                    if (pref.campusUnico && t.campus !== pref.campus) return false;
+                    if (t.horarios.length && !t.horarios.every(h => pref.turnos.includes(h.periodo))) return false;
+                    return true;
+                });
+                // prioridade do curso (SI): só ORDENA (melhor prioridade primeiro). Nunca exclui:
+                // toda turma listada em Turmas Abertas é considerada, mesmo Fechada ou sem vagas.
+                turmasViaveis = turmasViaveis.slice()
+                    .sort((a, b) => (a.prioridadeSI == null ? 99 : a.prioridadeSI) - (b.prioridadeSI == null ? 99 : b.prioridadeSI));
+                if (!turmasViaveis.length) return;     // exige oferta real (só campus/turno filtram)
+            } else {
+                if (!turmasViaveis.length) turmasViaveis = [{ codigo: cod, turma: '—', professor: '', horarios: [], campus: 'CURITIBA', estimada: true }];
+            }
+            cand.push({ disciplina: d, turmas: turmasViaveis });
+        });
+        return cand;
+    }
+
+    /* Prioridade (3.4.1) */
+    // periodoRef = período "nominal" do semestre sendo planejado (período atual + nº de semestres à frente).
+    // Matérias atrasadas/do período atual têm prioridade; obrigatórias de período muito futuro (ex.: TCC) decaem.
+    function prioridade(ctx, cand, cursadas, faltantesObrig, periodoRef, conjFeitos) {
+        const { grafo, pref } = ctx;
+        if (!ctx._descMemo) ctx._descMemo = descendentesTransitivos(grafo);
+        const P = periodoRef || 8;
+        return cand.map(c => {
+            const d = c.disciplina;
+            const fanout = getDesbloqueaveis(grafo, d.codigo, cursadas).length;     // destrava agora (1 nível)
+            const descSet = ctx._descMemo.get(d.codigo);
+            let alcance = 0; if (descSet) descSet.forEach(x => { if (!cursadas.has(x)) alcance++; });  // dependentes futuros ainda não cursados
+            const obrig = !d.isOpcional;
+            const isFaltObrig = obrig && faltantesObrig.has(d.codigo);
+            const trilhaRank = (d.subAreaTrilha && pref.preferenciaTrilhas.indexOf(d.subAreaTrilha) >= 0)
+                ? (pref.preferenciaTrilhas.length - pref.preferenciaTrilhas.indexOf(d.subAreaTrilha)) : 0;
+            // atraso em períodos: >0 atrasada (período passado), 0 = período atual, <0 = futura.
+            // Vale para TODAS as matérias (inclui optativas: 2º estrato/humanidades = 3º, trilhas = 4º).
+            const atrasoP = P - (d.periodoSugerido || 8);
+            const base = atrasoP >= 0
+                ? 30000 + Math.min(atrasoP, 6) * 2500        // atrasada/atual: quanto mais velha, mais urgente
+                : Math.max(0, 22000 + atrasoP * 5000);       // futura: decai forte a cada período à frente
+            let key = base + (obrig ? 4000 : 0) + alcance * 8 + fanout * 30 + trilhaRank * 5;
+            // conjunto optativo já satisfeito (2º estrato/humanidades/trilhas): para de empilhar essas optativas
+            if (conjFeitos && d.isOpcional && conjFeitos[d.conjuntoOptativo]) key -= 40000;
+            return Object.assign({}, c, { fanout, alcance, obrig, isFaltObrig, trilhaRank, _key: key });
+        }).sort((a, b) => b._key - a._key);
+    }
+
+    /* Geração de grades por backtracking com prazo (3.4.2-4) */
+    function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, trabConfig) {
+        const min = pref.cargaMin, max = pref.cargaMax;
+        const pool = candOrdenadas.slice(0, 14);             // limita explosão
+        const grades = []; let nodes = 0;
+        const trab = trabConfig && trabConfig.trabalha && (+trabConfig.horas > 0) ? trabConfig : null;
+
+        function score(sel) {
+            let nObr = 0, fan = 0, alc = 0, nTri = 0, nBlk = 0;
+            for (const s of sel) { if (s.obrig) nObr++; fan += s.fanout; alc += (s.alcance || 0); if (s.trilhaRank > 0) nTri++; if (s.bloqueado) nBlk++; }
+            let penTrab = 0;
+            if (trab) { const ct = custoTrab(trab, ocupacaoPorDia(sel)); penTrab = 12 * ct.deficit + 40 * ct.conflitosNucleo + 25 * ct.rigidConf; }
+            return 100 * nObr + 8 * fan + 2 * alc + 12 * nTri - 40 * nBlk - 6 * sel.length - penTrab;
+        }
+        function rec(idx, sel, ocup) {
+            if (Date.now() > deadline) return;
+            nodes++;
+            if (sel.length >= min) {
+                grades.push({ sel: sel.map(s => ({ ...s })), score: score(sel) });
+            }
+            if (sel.length >= max) return;
+            for (let i = idx; i < pool.length; i++) {
+                const c = pool[i];
+                // escolher melhor turma viável (sem conflito; bloqueio vira rascunho)
+                let chosen = null;
+                for (const t of c.turmas) {
+                    if (usarGNH && t.horarios.length && conflita(t.horarios, ocup)) continue;
+                    const blk = bloqueado(t.horarios, bloqueios);
+                    if (!chosen || (chosen.bloqueado && !blk)) chosen = { ...c, turma: t, bloqueado: blk, horarios: t.horarios };
+                    if (!blk) break;
+                }
+                if (!chosen) continue;
+                const novoOcup = ocup.concat(chosen.horarios);
+                rec(i + 1, sel.concat(chosen), novoOcup);
+                if (Date.now() > deadline) return;
+            }
+        }
+        rec(0, [], []);
+
+        // dedup por conjunto de códigos, top-5 por score
+        const vistos = new Set(); const unicas = [];
+        grades.sort((a, b) => b.score - a.score);
+        for (const g of grades) {
+            const key = g.sel.map(s => s.disciplina.codigo).sort().join(',');
+            if (vistos.has(key)) continue; vistos.add(key); unicas.push(g);
+            if (unicas.length >= 5) break;
+        }
+        return { grades: unicas, nodes, estourou: Date.now() > deadline };
+    }
+
+    /* Score de uma seleção arbitrária (grades personalizadas/editadas) — mesma fórmula do motor */
+    function pontuarSel(ctx, selRaw, cursadas, faltObrig, pref, bloqueios, trabConfig) {
+        if (!ctx._descMemo) ctx._descMemo = descendentesTransitivos(ctx.grafo);
+        let nObr = 0, fan = 0, alc = 0, nTri = 0, nBlk = 0;
+        for (const s of (selRaw || [])) {
+            const d = s.disciplina; if (!d) continue;
+            fan += getDesbloqueaveis(ctx.grafo, d.codigo, cursadas).length;
+            const desc = ctx._descMemo.get(d.codigo); if (desc) desc.forEach(x => { if (!cursadas.has(x)) alc++; });
+            if (!d.isOpcional) nObr++;
+            if (d.subAreaTrilha && pref.preferenciaTrilhas.indexOf(d.subAreaTrilha) >= 0) nTri++;
+            const blk = s.bloqueado != null ? s.bloqueado : bloqueado(s.horarios || [], bloqueios || []);
+            if (blk) nBlk++;
+        }
+        let penTrab = 0;
+        if (trabConfig && trabConfig.trabalha && +trabConfig.horas > 0) { const ct = custoTrab(trabConfig, ocupacaoPorDia(selRaw)); penTrab = 12 * ct.deficit + 40 * ct.conflitosNucleo + 25 * ct.rigidConf; }
+        return Math.round(100 * nObr + 8 * fan + 2 * alc + 12 * nTri - 40 * nBlk - 6 * (selRaw ? selRaw.length : 0) - penTrab);
+    }
+
+    /* ===================================================================
+        Cálculo de horas faltantes (validado contra histórico oficial)
+        =================================================================== */
+    function calcularHoras(matriz, cursadasSet, extras) {
+        const byCod = new Map(matriz.disciplinas.map(d => [d.codigo, d]));
+        const aprov = d => cursadasSet.has(d.codigo);
+        let obrCursada = 0;
+        matriz.disciplinas.filter(d => !d.isOpcional).forEach(d => { if (aprov(d)) obrCursada += d.chTotal; });
+
+        const porConjunto = {};
+        const addConj = (id, ch) => { porConjunto[id] = porConjunto[id] || { cursada: 0 }; porConjunto[id].cursada += ch; };
+        matriz.disciplinas.filter(d => d.isOpcional).forEach(d => {
+            if (!aprov(d)) return;
+            if (d.conjuntoOptativo === '1160' && d.subAreaTrilha) addConj(d.subAreaTrilha, d.chTotal);
+            else addConj(d.conjuntoOptativo, d.chTotal);
+        });
+        const c1159 = porConjunto['1159']?.cursada || 0;
+        const c1161 = porConjunto['1161']?.cursada || 0;
+        // trilhas: validação parcial (3 subáreas) — soma simples de CH cursada em subáreas
+        let trilhaCursada = 0; const subStatus = {};
+        Object.keys(TRILHA_SUBAREAS).forEach(id => {
+            const ch = porConjunto[id]?.cursada || 0; trilhaCursada += ch;
+            subStatus[id] = { nome: TRILHA_SUBAREAS[id], cursada: ch, validada: ch >= REQUISITOS.trilhaMin, faltante: Math.max(0, REQUISITOS.trilhaMin - ch) };
+        });
+        const validadas = Object.values(subStatus).filter(s => s.validada).length;
+
+        // extensão: ICSX20(60 obrig) + optativas aprovadas com chExt
+        let extCursada = 0;
+        matriz.disciplinas.forEach(d => { if (aprov(d) && d.chExt > 0) extCursada += d.chExt; });
+
+        const eletivaCursada = (extras && extras.eletivaManual) || 0;
+
+        const linha = (req, cur) => ({ total: req, cursada: cur, faltante: Math.max(0, req - cur), ok: cur >= req });
+        return {
+            obrigatorias: linha(REQUISITOS.obrigatorias, obrCursada),
+            optativasTotal: linha(REQUISITOS.optativas, c1159 + c1161 + trilhaCursada),
+            conj1159: linha(REQUISITOS.conj1159, c1159),
+            conj1161: linha(REQUISITOS.conj1161, c1161),
+            trilhas: {
+                total: REQUISITOS.trilhas1160, cursada: trilhaCursada,
+                faltante: validadas >= REQUISITOS.trilhasNecessarias ? Math.max(0, REQUISITOS.trilhas1160 - trilhaCursada) : Math.max(0, REQUISITOS.trilhas1160 - trilhaCursada),
+                validadas, ok: validadas >= REQUISITOS.trilhasNecessarias && trilhaCursada >= REQUISITOS.trilhas1160
+            },
+            subStatus,
+            eletivas: linha(REQUISITOS.eletivas, eletivaCursada),
+            extensao: linha(REQUISITOS.extensao, extCursada),
+            complementares: linha(REQUISITOS.complementares, cursadasSet.has('ICSX50') ? REQUISITOS.complementares : 0),
+        };
+    }
+
+    /* ---------- exports ---------- */
+    const API = {
+        norm, dice, reconstruirLinhas, parseMatriz, parseHistorico, parseTurmasAbertas,
+        detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos, pontuarSel,
+        candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado,
+        TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase,
+        ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
+        DIAS_UTEIS, DEFAULT_TRAB, normTrab, fmtHHMM, fmtDur, janelaTrab, capacidadeDia,
+        analiseDia, placeBloco, alocarTrab, ocupacaoPorDia, custoTrab, blocosTrabalhoCalc, desejHoras
+    };
+    if (typeof module !== 'undefined' && module.exports) module.exports = API;
+    root.Compass = API;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* ===== Compass+ UI ===== */
+/* ===================================================================
+    Compass+ — Interface (depende de window.Compass)
+    =================================================================== */
+const K = window.Compass;
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const root = $('#root');
+const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* ---------- Ajuda: como exportar os PDFs do Portal do Aluno (slide-over) ---------- */
+const AJUDA_IMGS = /*__AJUDA_IMGS__*/[{ "w": 360, "h": 103, "src": "data:image/png;base64,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", "alt": "Tela de Turmas Abertas com seta indicando os campos Campus, Curso e o botão Confirmar", "cap": "Figura 1 – Selecione seu Campus, seu Curso e pressione Confirmar." }, { "w": 172, "h": 143, "src": "data:image/png;base64,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", "alt": "Tela de Turmas Abertas com seta indicando os dois botões de imprimir", "cap": "Figura 2 – Clique em qualquer um dos dois botões de impressão. Salve como turmas_abertas.pdf." }, { "w": 510, "h": 78, "src": "data:image/png;base64,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", "alt": "Tela do Histórico Completo com seta indicando o botão de imprimir o Histórico Escolar", "cap": "Figura 3 – Clique no botão de impressão do Histórico Escolar. Salve como historico_completo.pdf." }, { "w": 245, "h": 84, "src": "data:image/png;base64,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", "alt": "Tela de Matrizes Curriculares com seta indicando o botão de imprimir a Matriz Curricular", "cap": "Figura 4 – Clique no botão de impressão da Matriz Curricular. Salve como matriz_curricular.pdf." }];   // [{w,h,src,alt,cap}] na ordem Fig1..Fig4
+function ajudaFig(i) {
+    const im = AJUDA_IMGS[i]; if (!im) return '';
+    return `<figure class="ajuda-fig"><img src="${im.src}" alt="${esc(im.alt)}" width="${im.w}" height="${im.h}" loading="lazy"><figcaption>${esc(im.cap)}</figcaption></figure>`;
+}
+function abrirAjuda() {
+    if (document.getElementById('ajuda-ov')) return;
+    const ov = document.createElement('div'); ov.id = 'ajuda-ov'; ov.className = 'ajuda-ov';
+    ov.innerHTML = `
+    <div class="ajuda-backdrop" data-fechar-ajuda></div>
+    <aside class="ajuda-panel" role="dialog" aria-label="Como exportar os PDFs">
+        <header class="ajuda-head"><h2>📄 Como exportar os PDFs do Portal do Aluno</h2><button class="btn btn-sm btn-ghost" data-fechar-ajuda aria-label="Fechar">✕</button></header>
+        <div class="ajuda-body">
+        <div class="ajuda-note">
+            <b>ℹ️ Antes de começar — como salvar o PDF certo:</b>
+            <ol>
+            <li>Ao clicar em qualquer botão de impressão, abre a janela de impressão do navegador.</li>
+            <li>Em <b>Destino</b> (ou <i>Destination</i>), escolha <b>Salvar como PDF</b>.</li>
+            <li><b>Renomeie o arquivo</b> — todos saem com o mesmo nome "Portal do Aluno - Curitiba". Use nomes claros: <code>turmas_abertas.pdf</code>, <code>historico_completo.pdf</code>, <code>matriz_curricular.pdf</code>.</li>
+            </ol>
+        </div>
+
+        <section><h3>Etapa 1 — Turmas Abertas</h3>
+            <p><b>Caminho:</b> Página Inicial → Turmas Abertas.</p>
+            <p>Selecione o seu <b>Campus</b> e o seu <b>Curso</b> e clique em <b>Confirmar</b> para carregar a lista de turmas.</p>
+            ${ajudaFig(0)}
+            <p>Com as turmas na tela, clique em <b>qualquer um dos dois botões de imprimir</b> (seta vermelha) e salve como <b>turmas_abertas.pdf</b>.</p>
+            ${ajudaFig(1)}
+        </section>
+
+        <section><h3>Etapa 2 — Histórico Completo</h3>
+            <p><b>Caminho:</b> Página Inicial → Histórico Completo.</p>
+            <p>Pressione <b>Imprimir Histórico Escolar</b> (seta vermelha) e salve como <b>historico_completo.pdf</b>.</p>
+            ${ajudaFig(2)}
+        </section>
+
+        <section><h3>Etapa 3 — Matrizes Curriculares</h3>
+            <p><b>Caminho:</b> Página Inicial → Matrizes Curriculares.</p>
+            <p>Pressione <b>Imprimir Matriz Curricular</b> (seta vermelha) e salve como <b>matriz_curricular.pdf</b>.</p>
+            ${ajudaFig(3)}
+        </section>
+        <p class="muted" style="font-size:11px">Tutorial referente ao Portal do Aluno da UTFPR — Campus Curitiba.</p>
+        </div>
+    </aside>`;
+    ov.addEventListener('click', e => { if (e.target.closest('[data-fechar-ajuda]')) fecharAjuda(); });
+    document.body.appendChild(ov);
+    requestAnimationFrame(() => ov.classList.add('on'));
+}
+function fecharAjuda() { const ov = document.getElementById('ajuda-ov'); if (ov) { ov.classList.remove('on'); setTimeout(() => ov.remove(), 260); } }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharAjuda(); });
+
+/* ---------- Extração via PDF.js (espelha o dump de teste) ---------- */
+async function extrairPaginas(file, onProg) {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pages = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const vp = page.getViewport({ scale: 1 });
+        const tc = await page.getTextContent();
+        const items = [];
+        for (const it of tc.items) {
+            const str = it.str; if (!str || !str.trim()) continue;
+            const x = it.transform[4], f = it.transform[5];
+            const h = it.height || 9, w = it.width || str.length * 5;
+            const yTop = vp.height - f;
+            const words = str.trim().split(/\s+/);
+            if (words.length <= 1) { items.push({ str: str.trim(), x, yTop, w, h }); }
+            else {
+                const total = str.length; let ci = 0;
+                for (const wd of words) { const idx = str.indexOf(wd, ci); const off = idx < 0 ? ci : idx; items.push({ str: wd, x: x + (off / total) * w, yTop, w: (wd.length / total) * w, h }); ci = off + wd.length; }
+            }
+        }
+        pages.push({ h: vp.height, items });
+        if (onProg) onProg(p / pdf.numPages);
+    }
+    return pages;
+}
+
+/* ---------- Estado ---------- */
+const DEFAULT_PREF = { campusUnico: false, campus: 'CURITIBA', turnos: ['M', 'T', 'N'], cargaMin: 4, cargaMax: 7, preferenciaTrilhas: [], eletivaManual: 0 };
+let S = null;          // estado persistido
+let D = {};            // derivado (não persistido)
+
+function novoEstado() {
+    return {
+        fase: 'upload', files: { matriz: null, historico: null, gnh: null }, parsed: { matriz: null, historico: null, gnh: null },
+        equivalencias: {}, divergPendentes: [], preferencias: structuredClone(DEFAULT_PREF), bloqueios: {}, trabalho: {}, trabPresets: [],
+        escolhas: {}, custom: {}, editor: null, manuais: { estagios: {}, eletiva: { h: 0, sem: 0 }, extensao: { h: 0, sem: 0 }, enade: { done: false, sem: null } },
+        abaAtiva: 0, sidebarCollapsed: false
+    };
+}
+function salvar() { try { const c = structuredClone(S); delete c.files; delete c.trabPresets; localStorage.setItem('compass_state', JSON.stringify(c)); salvarPresets(); } catch (e) { console.warn(e); } }
+function carregar() {
+    try {
+        const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = [];
+        for (const k in o.trabalho) { o.trabalho[k] = K.normTrab(o.trabalho[k]); }   // migra estados antigos (campos novos)
+        o.trabPresets.forEach(p => { p.cfg = K.normTrab(p.cfg); });
+        return o;
+    } catch (e) { return null; }
+}
+// Configurações de trabalho: chave dedicada, durável — sobrevive ao "Reiniciar tudo"
+const PRESETS_KEY = 'compass_trab_presets';
+function salvarPresets() { try { localStorage.setItem(PRESETS_KEY, JSON.stringify(S.trabPresets || [])); } catch (e) { } }
+function carregarPresets() { try { const r = localStorage.getItem(PRESETS_KEY); if (r == null) return null; const a = JSON.parse(r); return Array.isArray(a) ? a.map(p => ({ id: p.id, nome: p.nome, cfg: K.normTrab(p.cfg) })) : []; } catch (e) { return null; } }
+// popula S.trabPresets a partir da chave dedicada (ou semeia a chave com o que já houver no estado)
+function hidratarPresets() { const dk = carregarPresets(); if (dk !== null) { S.trabPresets = dk; } else { S.trabPresets = S.trabPresets || []; salvarPresets(); } }
+const ORDER = K.ORDEM_SLOTS;                                // [[p,s], ...] ordem vertical
+function manualBlocos(idx) { return (S.bloqueios && S.bloqueios[idx]) || []; }
+function trabDoSem(idx) { return (S.trabalho && S.trabalho[idx]) || null; }
+// blocos de trabalho (auto) calculados a partir de uma seleção de grade
+function trabCalc(idx, sel) { return K.blocosTrabalhoCalc(trabDoSem(idx), K.ocupacaoPorDia(sel || [])); }
+function totalBloqueios() { let n = 0; for (const i in (S.bloqueios || {})) n += S.bloqueios[i].length; return n; }
+
+/* ---- Configurações de trabalho nomeadas (presets, globais) ---- */
+const TRAB_CFG_KEYS = ['horas', 'inicio', 'maxComeco', 'minFim', 'fim', 'flexivel', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos', 'folga'];
+function trabCfgDe(w) { const n = K.normTrab(w); const o = {}; TRAB_CFG_KEYS.forEach(k => o[k] = k === 'diasPreferidos' ? n[k].slice().sort() : n[k]); return o; }
+function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return TRAB_CFG_KEYS.every(k => k === 'diasPreferidos' ? (x[k].join(',') === y[k].join(',')) : (x[k] === y[k])); }
+function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabDoSem(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
+function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
+function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
+
+/* ---------- Derivação (grafo, ctx) ---------- */
+function derive() {
+    D = {};
+    const { matriz, historico, gnh } = S.parsed;
+    if (!matriz || !historico || !gnh) return;
+    D.matriz = matriz; D.hist = historico;
+    D.byCod = new Map(matriz.disciplinas.map(d => [d.codigo, d]));
+    D.grafo = K.construirGrafo(matriz.disciplinas);
+    // aplicar equivalências aos códigos da GNH
+    const eq = S.equivalencias || {};
+    const gnhEff = gnh.map(t => ({ ...t, codigo: eq[t.codigo] || t.codigo }));
+    D.gnhEff = gnhEff;
+    D.gnhByCod = new Map();
+    for (const t of gnhEff) { if (!D.gnhByCod.has(t.codigo)) D.gnhByCod.set(t.codigo, []); D.gnhByCod.get(t.codigo).push(t); }
+    // turmas em-andamento (por código+turma do histórico)
+    D.cursadasBase = new Set(historico.cursadasAprovadas);
+    D.emAndamento = historico.emAndamento.slice();
+    D.ctx = { matrizByCod: D.byCod, grafo: D.grafo, gnhByCod: D.gnhByCod, equiv: eq, pref: S.preferencias };
+    D.projecao = projetar();
+}
+
+function turmaDe(cod, turmaId) {
+    const arr = D.gnhByCod.get(cod) || [];
+    return arr.find(t => t.turma === turmaId) || arr[0] || null;
+}
+function tipoDe(d) {
+    if (!d) return 'OPT';
+    if (!d.isOpcional) return 'OBR';
+    if (d.conjuntoOptativo === '1161') return 'HUM';
+    if (d.conjuntoOptativo === '1159') return 'OPT';
+    if (d.conjuntoOptativo === '1160') return 'TRI';
+    return 'OPT';
+}
+
+/* ---------- Projeção dos semestres ---------- */
+function rotuloSem(idx) { // idx 0 = 2026/1
+    let ano = 2026 + Math.floor((idx + 0) / 2);
+    let per = (idx % 2) + 1;
+    // idx0 ->2026/1, idx1->2026/2, idx2->2027/1 ...
+    ano = 2026 + Math.floor(idx / 2); per = (idx % 2) + 1;
+    return `${ano}/${per}`;
+}
+function manualNoSem(idx) {
+    const out = [];
+    const m = S.manuais;
+    for (const cod in m.estagios) { if (m.estagios[cod] === idx) out.push(cod); }
+    return out;
+}
+function extrasAteSem(idx) {
+    const m = S.manuais;
+    const eSem = m.eletiva.sem == null ? 0 : m.eletiva.sem;     // null = conta desde o início
+    const xSem = m.extensao.sem == null ? 0 : m.extensao.sem;
+    return {
+        eletivaManual: (m.eletiva.h > 0 && eSem <= idx) ? m.eletiva.h : 0,
+        extensaoManual: (m.extensao.h > 0 && xSem <= idx) ? m.extensao.h : 0,
+    };
+}
+function cursadasComManuais(baseSet, idx) {
+    const s = new Set(baseSet);
+    const m = S.manuais;
+    for (const cod in m.estagios) { if (m.estagios[cod] != null && m.estagios[cod] <= idx) s.add(cod); }
+    return s;
+}
+function formaturaOK(horas, idx) {
+    const m = S.manuais;
+    return horas.obrigatorias.faltante === 0 && horas.conj1159.faltante === 0 && horas.conj1161.faltante === 0 &&
+        horas.trilhas.validadas >= K.REQUISITOS.trilhasNecessarias && horas.trilhas.faltante === 0 &&
+        horas.eletivas.faltante === 0 && horas.extensao.faltante === 0 &&
+        (m.enade.done && m.enade.sem != null && m.enade.sem <= idx) &&
+        D.cursadasFinal && D.cursadasFinal.has('ICSX41');
+}
+
+function calcHorasIdx(cursadasSet, idx) {
+    const extras = extrasAteSem(idx);
+    // extensão manual soma à extensão cursada
+    const h = K.calcularHoras(D.matriz, cursadasSet, { eletivaManual: extras.eletivaManual });
+    if (extras.extensaoManual) { h.extensao.cursada += extras.extensaoManual; h.extensao.faltante = Math.max(0, h.extensao.total - h.extensao.cursada); h.extensao.ok = h.extensao.faltante === 0; }
+    return h;
+}
+
+function projetar() {
+    const sems = [];
+    // Semestre 0 = atual (2026/1) — em andamento, leitura
+    const andDiscs = D.emAndamento.map(cod => {
+        const reg = D.hist.cursadas.find(c => c.codigo === cod);
+        const t = turmaDe(cod, reg && reg.turma);
+        return { disciplina: D.byCod.get(cod), turma: t, horarios: t ? t.horarios : [], bloqueado: false, andamento: true };
+    }).filter(x => x.disciplina);
+    let cursadas = cursadasComManuais(D.cursadasBase, 0);
+    let h0 = calcHorasIdx(cursadas, 0);
+    sems.push({ idx: 0, rotulo: rotuloSem(0), status: 'atual', grade: { sel: andDiscs }, grades: [], escolhida: true, horas: h0, candidatas: [], manuais: manualNoSem(0), formatura: false, bloqueios: manualBlocos(0), trab: trabCalc(0, andDiscs) });
+    // a partir de 2026/2 assume-se que as em-andamento foram aprovadas
+    cursadas = new Set([...cursadas, ...D.emAndamento]);
+
+    const MAXSEM = 14;
+    for (let idx = 1; idx <= MAXSEM; idx++) {
+        const curIdx = new Set(cursadas);
+        const cand = K.candidatasSemestre(D.ctx, curIdx, new Set(), true);
+        const faltObrig = new Set(D.matriz.disciplinas.filter(d => !d.isOpcional && !curIdx.has(d.codigo)).map(d => d.codigo));
+        const periodoRef = (D.hist.aluno.periodoAtual || 1) + idx;   // período nominal deste semestre projetado
+        const hAgora = calcHorasIdx(curIdx, idx);                    // conjuntos optativos já satisfeitos?
+        const conjFeitos = {
+            '1159': hAgora.conj1159.faltante === 0,
+            '1161': hAgora.conj1161.faltante === 0,
+            '1160': hAgora.trilhas.faltante === 0 && hAgora.trilhas.validadas >= K.REQUISITOS.trilhasNecessarias,
+        };
+        const ord = K.prioridade(D.ctx, cand, curIdx, faltObrig, periodoRef, conjFeitos);
+        const manuais = manualBlocos(idx);
+        const w = trabDoSem(idx);
+        const ger = K.gerarGrades(D.ctx, ord, S.preferencias, manuais, true, Date.now() + 700, w);
+        let grades = ger.grades;
+
+        // grades personalizadas salvas (score recalculado automaticamente)
+        const pontuar = g => { if (g) g.score = K.pontuarSel(D.ctx, g.sel, curIdx, faltObrig, S.preferencias, manuais, w); return g; };
+        const pers = (S.custom[idx] || []).map(c => pontuar(reconstruirGrade(c, curIdx, manuais))).filter(Boolean);
+
+        // escolha do usuário?
+        const esc = S.escolhas[idx];
+        let escolhida = null, confirmada = false;
+        if (esc) { escolhida = pontuar(reconstruirGrade(esc, curIdx, manuais)); confirmada = true; }
+        if (!escolhida) escolhida = grades[0] || { sel: [] };
+
+        // aplica disciplinas não-rascunho
+        const add = escolhida.sel.filter(s => !s.bloqueado).map(s => s.disciplina.codigo);
+        const manuaisAqui = manualNoSem(idx);
+        cursadas = new Set([...cursadas, ...add]);
+        cursadas = cursadasComManuais(cursadas, idx); // inclui estágios marcados <= idx
+
+        const horas = calcHorasIdx(cursadas, idx);
+        D.cursadasFinal = cursadas;
+        const formatura = formaturaOK(horas, idx);
+
+        sems.push({
+            idx, rotulo: rotuloSem(idx), status: confirmada ? 'confirmado' : 'futuro',
+            grade: escolhida, grades, personalizadas: pers, escolhida: confirmada, horas, candidatas: ord,
+            manuais: manuaisAqui, formatura, estourou: ger.estourou, inviavel: grades.length === 0,
+            bloqueios: manuais, trab: trabCalc(idx, escolhida.sel), cursadasAntes: curIdx, faltObrig
+        });
+
+        if (formatura) break;
+        // se nada novo entrou e não há candidatas, evita loop infinito
+        if (add.length === 0 && manuaisAqui.length === 0 && idx > 1 && grades.length === 0) break;
+    }
+    return sems;
+}
+
+function reconstruirGrade(escolha, cursadas, blocos) {
+    if (!escolha || !escolha.codigos) return null;
+    blocos = blocos || [];
+    const sel = [];
+    for (const cod of escolha.codigos) {
+        const d = D.byCod.get(cod); if (!d) continue;
+        const t = turmaDe(cod, (escolha.turmas || {})[cod]);
+        const blk = t ? K.bloqueado(t.horarios, blocos) : false;
+        sel.push({ disciplina: d, turma: t, horarios: t ? t.horarios : [], bloqueado: blk, fanout: 0, alcance: 0, trilhaRank: 0, obrig: !d.isOpcional });
+    }
+    return { sel, score: escolha.score || 0, custom: !!escolha.custom };
+}
+
+/* ===================================================================
+    RENDER
+    =================================================================== */
+function render() {
+    if (S.fase === 'upload') return renderUpload();
+    if (S.fase === 'divergencias') return renderDivergencias();
+    if (S.fase === 'preferencias') return renderPreferencias();
+    if (S.fase === 'grafo') { derive(); return renderGrafo(); }
+    if (S.fase === 'app') { derive(); return renderApp(); }
+}
+
+/* ---------- Upload ---------- */
+function renderUpload() {
+    const f = S.files;
+    const zonas = [
+        ['matriz', 'Matriz Curricular', '📚', 'Grade do curso: disciplinas, períodos e pré-requisitos.'],
+        ['historico', 'Histórico Escolar', '🎓', 'Disciplinas cursadas, situação e coeficientes.'],
+        ['gnh', 'Turmas Abertas', '🗓️', 'Turmas ofertadas no semestre, com horários, vagas e prioridade de curso.'],
+    ];
+    root.innerHTML = `
+<div class="welcome">
+<div class="brand"><div class="logo">C+</div><div><h1>Compass+</h1><div class="muted" style="font-size:13px">Planejamento acadêmico · UTFPR — Sistemas de Informação</div></div></div>
+<p class="sub">Envie os três PDFs do <b>Portal do Aluno</b> (Matriz, Histórico e Turmas Abertas). Tudo é processado <b>localmente no seu navegador</b> — nada é enviado a servidores. <button class="btn btn-sm btn-ghost" id="abrir-ajuda">❓ Como exportar os PDFs</button></p>
+<div class="dropzones">
+    ${zonas.map(([k, t, ic, desc]) => {
+        return `<div class="dz ${f[k] ? 'done' : ''}" data-dz="${k}">
+        <div class="ico">${f[k] ? '✅' : ic}</div>
+        <h3>${t}</h3>
+        ${f[k] ? `<div class="fname">${esc(f[k].name)}</div>` : `<p>${desc}</p>`}
+        <div class="bar"><i data-bar="${k}" style="width:${f[k] ? 100 : 0}%"></i></div>
+        <button class="btn btn-sm btn-ghost" data-pick="${k}">${f[k] ? 'Trocar arquivo' : 'Selecionar PDF'}</button>
+        <input type="file" accept="application/pdf,.pdf" data-input="${k}" class="hidden">
+    </div>`;
+    }).join('')}
+</div>
+<div class="actions">
+    <button class="btn btn-primary" id="processar" ${(!f.matriz || !f.historico || !f.gnh) ? 'disabled' : ''}>Processar e planejar →</button>
+    <span class="muted" id="proc-status"></span>
+    ${localStorage.getItem('compass_state') ? '<button class="btn btn-ghost" id="restaurar">Restaurar sessão salva</button>' : ''}
+</div>
+<div class="steps">
+    ${['Upload dos PDFs', 'Resolução de divergências', 'Preferências', 'Planejamento'].map((s, i) => `<div class="step"><b>${i + 1}</b>${s}</div>`).join('')}
+</div>
+</div>`;
+}
+
+/* ---------- Divergências (Módulo 1.5) ---------- */
+function renderDivergencias() {
+    const d = S.divergPendentes[0];
+    if (!d) { S.fase = 'preferencias'; salvar(); return render(); }
+    const total = S.divergTotal || S.divergPendentes.length;
+    const atual = total - S.divergPendentes.length + 1;
+    root.innerHTML = `
+<div class="overlay"><div class="modal">
+<div class="diverg-progress">Divergência ${atual} de ${total}</div>
+<h2>Confirme a equivalência de disciplina</h2>
+<div class="q"><b>“${esc(d.gnhNome)}”</b> aparece nas Turmas Abertas com o código <b class="mono">${esc(d.gnhCod)}</b>,
+    mas na matriz como <b class="mono">${esc(d.matrizCod)}</b> (<b>${esc(d.matrizNome)}</b>).<br>
+    Similaridade de nome: <b>${Math.round(d.score * 100)}%</b>. São a mesma disciplina?</div>
+<div class="row">
+    <button class="btn btn-ghost" data-div="no">✗ Não, são diferentes</button>
+    <button class="btn btn-primary" data-div="yes">✓ Sim, mesma disciplina</button>
+</div>
+</div></div>`;
+}
+
+/* ---------- Preferências (Módulo 2) ---------- */
+function renderPreferencias() {
+    const p = S.preferencias;
+    const m = S.parsed.matriz;
+    const subareas = m.resumo.conjuntosOptativos.find(c => c.id === '1160');
+    if (!p.preferenciaTrilhas.length) p.preferenciaTrilhas = Object.keys(K.TRILHA_SUBAREAS);
+    const trilhas = p.preferenciaTrilhas;
+    root.innerHTML = `
+<div class="pref-screen">
+<div class="brand"><div class="logo">C+</div><div><h1>Preferências</h1><div class="muted" style="font-size:13px">Ajuste antes de calcular as grades. Você pode alterar depois na barra lateral.</div></div></div>
+<div class="pref-grid">
+    <div class="card">
+    <h3>🏫 Campus</h3>
+    <div class="spread"><span>Restringir a um único campus</span><div class="toggle ${p.campusUnico ? 'on' : ''}" data-pref="campusUnico"><i></i></div></div>
+    <div class="seg ${p.campusUnico ? '' : 'hidden'}" style="margin-top:12px" id="campus-seg">
+        ${['CURITIBA', 'ECOVILLE', 'NEOVILLE'].map(c => `<button class="${p.campus === c ? 'on' : ''}" data-campus="${c}">${c === 'CURITIBA' ? 'Curitiba (CB)' : c === 'ECOVILLE' ? 'Ecoville (*)' : 'Neoville (**)'}</button>`).join('')}
+    </div>
+    </div>
+    <div class="card">
+    <h3>🕑 Turnos disponíveis</h3>
+    <div class="checks">
+        ${[['M', 'Manhã'], ['T', 'Tarde'], ['N', 'Noite']].map(([k, t]) => `<div class="check ${p.turnos.includes(k) ? 'on' : ''}" data-turno="${k}">${t} (${k})</div>`).join('')}
+    </div>
+    <div class="hint">Selecione ao menos um turno.</div>
+    </div>
+    <div class="card">
+    <h3>📦 Carga por semestre</h3>
+    <div class="spread"><span class="muted">Mínimo</span><span class="bignum" id="lbl-min">${p.cargaMin}</span></div>
+    <input type="range" min="1" max="10" value="${p.cargaMin}" data-range="cargaMin" style="width:100%">
+    <div class="spread" style="margin-top:10px"><span class="muted">Máximo</span><span class="bignum" id="lbl-max">${p.cargaMax}</span></div>
+    <input type="range" min="1" max="10" value="${p.cargaMax}" data-range="cargaMax" style="width:100%">
+    <div class="hint">O sistema priorizará a menor quantidade dentro desta faixa.</div>
+    </div>
+    <div class="card">
+    <h3>🧭 Preferência de trilhas (Terceiro Estrato)</h3>
+    <div class="hint" style="margin-top:0;margin-bottom:10px">Arraste para ordenar (1 = mais preferida). Usado para desempatar grades.</div>
+    <ul class="trilha-list" id="trilhas">
+        ${trilhas.map((id, i) => `<li data-id="${id}"><span class="rank">${i + 1}</span><span>${esc(K.TRILHA_SUBAREAS[id])}</span><span class="mono muted" style="font-size:11px">[${id}]</span><span class="grip">⋮⋮</span></li>`).join('')}
+    </ul>
+    </div>
+</div>
+<div class="actions" style="margin-top:22px;display:flex;gap:12px">
+    <button class="btn btn-primary" id="ir-app">Calcular grades →</button>
+    <button class="btn btn-ghost" id="voltar-upload">← Voltar</button>
+</div>
+</div>`;
+    initTrilhasDrag();
+}
+
+function blockGridHTML(sem) {
+    const idx = sem.idx;
+    const man = manualBlocos(idx);
+    const auto = (sem.trab && sem.trab.slots) || [];
+    const intervalos = (sem.trab && sem.trab.intervalos) || {};
+    const autoKey = new Set(auto.map(b => b.diaSemana + b.periodo + b.slot));
+    const periods = [['M', 6], ['T', 6], ['N', 5]];
+    let rows = '';
+    periods.forEach(([per, n], pi) => {
+        for (let s = 1; s <= n; s++) {
+            const ord = K.ORDEM_SLOTS.findIndex(o => o[0] === per && o[1] === s);
+            const hora = K.slotTexto(per, s);
+            rows += `<tr><td class="rowlbl" data-tip="${per}${s} · ${hora}">${per}${s}</td>`;
+            for (let d = 2; d <= 7; d++) {
+                const mb = man.find(b => b.diaSemana === d && b.periodo === per && b.slot === s);
+                const isAuto = !mb && autoKey.has(d + per + s);
+                const cls = mb ? 'blk' : isAuto ? 'auto' : '';
+                const iv = intervalos[d];
+                const label = mb ? esc(mb.nome.slice(0, 4)) : isAuto ? 'Trab' : '';
+                const tip = `${K.DIAS[d]} ${per}${s} · ${hora}` + (mb ? `\\nBloqueio: ${esc(mb.nome)}` : isAuto && iv ? `\\nTrabalho ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} · ${K.fmtDur(iv.horas)}` : isAuto ? `\\nTrabalho (automático)` : '\\n(clique/arraste p/ travar)');
+                rows += `<td class="slot ${cls}" data-sem="${idx}" data-d="${d}" data-p="${per}" data-s="${s}" data-ord="${ord}" data-tip="${tip}">${label}</td>`;
+            }
+            rows += '</tr>';
+        }
+        if (pi < 2) rows += '<tr class="sep"><td colspan="7"></td></tr>';
+    });
+    return `<div class="cal-wrap"><table class="blockgrid"><thead><tr><th></th>${[2, 3, 4, 5, 6, 7].map(d => `<th>${K.DIAS[d].slice(0, 3)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function blocosSemestreHTML(sem) {
+    const w = K.normTrab(trabDoSem(sem.idx));
+    const trab = sem.trab || {};
+    const nMan = manualBlocos(sem.idx).length;
+    const nTrab = (trab.slots || []).length;
+    const total = nMan + nTrab;
+    const J = K.janelaTrab(w);
+    const dn = { 2: 'Seg', 3: 'Ter', 4: 'Qua', 5: 'Qui', 6: 'Sex' };
+    const resumo = K.DIAS_UTEIS.map(d => {
+        const iv = trab.intervalos && trab.intervalos[d];
+        return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
+    }).join(' · ');
+    const flexFields = w.flexivel ? `
+    <label>Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${sem.idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${sem.idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
+    <label>Disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${sem.idx}"> dia(s)/sem</label>
+    <div style="flex-basis:100%;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+    <span class="muted">Dias que prefere flexibilizar:</span>
+    ${K.DIAS_UTEIS.map(d => `<span class="daychip ${w.diasPreferidos.includes(d) ? 'on' : ''}" data-trab-dia="${d}" data-sem="${sem.idx}">${dn[d]}</span>`).join('')}
+    </div>` : '';
+    const presets = S.trabPresets || [];
+    const presetsRow = `
+    <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:2px">
+    <span class="muted">📁 Configurações salvas:</span>
+    ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${sem.idx}" data-tip="Clique para aplicar “${esc(p.nome)}” a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma ainda</span>'}
+    <button class="btn btn-sm btn-ghost" data-trab-preset-save="${sem.idx}">💾 Salvar atual…</button>
+    </div>`;
+    const respondido = w.trabalha !== null && w.trabalha !== undefined;   // S4: respondeu Sim/Não?
+    const indicativo = respondido
+        ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
+        : `<span class="chip" style="color:var(--secondary)">responda →</span>`;
+    return `<details class="personalize" id="blocos-${sem.idx}" ${!respondido ? 'open' : ''} style="margin-top:14px">
+<summary>🔒 Horários travados de ${esc(sem.rotulo)} ${indicativo} <span class="muted" style="font-weight:400;font-size:12px">— ${nMan} manual${nMan === 1 ? '' : 'is'}${w.trabalha ? ` + trabalho` : ''}</span></summary>
+<div class="work-form">
+    <label style="gap:10px"><span style="color:var(--text);font-weight:600">💼 Você trabalha neste semestre?</span>
+    <span class="segbtn">
+        <button class="seg ${w.trabalha === true ? 'on' : ''}" data-trab-sim="${sem.idx}">Sim</button>
+        <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${sem.idx}">Não</button>
+    </span></label>
+    ${w.trabalha ? `
+    ${presetsRow}
+    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
+    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${sem.idx}"></label>
+    <label>no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${sem.idx}"></label>
+    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${sem.idx}"></label>
+    <label>e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${sem.idx}"></label>
+    <label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${sem.idx}"> min</label>
+    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🔁 Seus horários são flexíveis?</span>
+    <span class="toggle ${w.flexivel ? 'on' : ''}" data-trab-flex="${sem.idx}" style="width:38px;height:22px"><i></i></span>
+    <span class="muted">núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})</span></label>
+    ${flexFields}
+    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${w.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>` : ''}</div>
+    `: ''}
+</div>
+<div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você tem horários flexíveis.</div>
+<div style="padding:0 16px 16px">${blockGridHTML(sem)}</div>
+</details>`;
+}
+
+function initTrilhasDrag() {
+    const ul = $('#trilhas'); if (!ul || !window.Sortable) return;
+    Sortable.create(ul, {
+        animation: 150, handle: '.grip', ghostClass: 'sortable-ghost',
+        onEnd() {
+            S.preferencias.preferenciaTrilhas = $$('#trilhas li').map(li => li.dataset.id);
+            $$('#trilhas .rank').forEach((r, i) => r.textContent = i + 1); salvar();
+        }
+    });
+}
+
+/* ===================================================================
+    Grafo de matérias (obrigatórias + trilhas) — force-directed em SVG
+    =================================================================== */
+let GRAFO = null;
+const ROT_STATUS = { concluida: 'Concluída', cursando: 'Cursando agora', disponivel: 'Disponível', bloqueada: 'Bloqueada (faltam pré-req)' };
+const NODE_HALF = 30;
+
+function grafoDados() {
+    const incl = d => !d.isOpcional || d.conjuntoOptativo === '1160';     // obrigatórias + trilhas
+    const discs = D.matriz.disciplinas.filter(incl);
+    const setCods = new Set(discs.map(d => d.codigo));
+    const aprov = D.cursadasBase;
+    const andamento = new Set(D.emAndamento);
+    const feitas = new Set([...aprov, ...andamento]);
+    const semPlan = {};
+    (D.projecao || []).forEach(s => {
+        if (s.idx > 0 && s.grade && s.grade.sel) s.grade.sel.forEach(x => {
+            const c = x.disciplina && x.disciplina.codigo; if (c && setCods.has(c) && semPlan[c] == null && !x.bloqueado) semPlan[c] = s.idx;
+        });
+    });
+    const statusDe = cod => {
+        if (aprov.has(cod)) return 'concluida';
+        if (andamento.has(cod)) return 'cursando';
+        const v = D.grafo.get(cod); let ok = true; if (v) v.in.forEach(p => { if (!feitas.has(p)) ok = false; });
+        return ok ? 'disponivel' : 'bloqueada';
+    };
+    const nodes = discs.map(d => ({
+        cod: d.codigo, d, tipo: tipoDe(d), status: statusDe(d.codigo),
+        sem: semPlan[d.codigo], per: d.periodoSugerido || 0, x: 0, y: 0, dx: 0, dy: 0
+    }));
+    const edges = [];
+    for (const d of discs) for (const p of d.preRequisitos) if (setCods.has(p)) edges.push({ from: p, to: d.codigo });
+    return { nodes, edges, byCod: new Map(nodes.map(n => [n.cod, n])), sel: null, view: { x: 0, y: 0, k: 1 } };
+}
+
+// Fruchterman–Reingold: posições estáveis precomputadas (semeadas por período)
+function layoutForca(g, W, H, iters) {
+    const n = g.nodes.length; if (!n) return;
+    const k = Math.sqrt((W * H) / n) * 0.8;
+    g.nodes.forEach((nd, i) => { const p = nd.per > 0 ? nd.per : 4; nd.x = (p / 9) * W + (Math.random() * 80 - 40); nd.y = (H * 0.08) + (i * 131 % Math.max(1, H - 100)) + (Math.random() * 40 - 20); });
+    const adj = g.edges.map(e => [g.byCod.get(e.from), g.byCod.get(e.to)]).filter(a => a[0] && a[1]);
+    let t = W * 0.10;
+    for (let it = 0; it < iters; it++) {
+        g.nodes.forEach(v => { v.dx = 0; v.dy = 0; });
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+            const a = g.nodes[i], b = g.nodes[j];
+            let dx = a.x - b.x, dy = a.y - b.y, dist = Math.hypot(dx, dy) || 0.01; const f = k * k / dist, ux = dx / dist, uy = dy / dist;
+            a.dx += ux * f; a.dy += uy * f; b.dx -= ux * f; b.dy -= uy * f;
+        }
+        for (const [a, b] of adj) {
+            let dx = a.x - b.x, dy = a.y - b.y, dist = Math.hypot(dx, dy) || 0.01; const f = dist * dist / k, ux = dx / dist, uy = dy / dist;
+            a.dx -= ux * f; a.dy -= uy * f; b.dx += ux * f; b.dy += uy * f;
+        }
+        g.nodes.forEach(v => {
+            v.dx += (W / 2 - v.x) * 0.012; v.dy += (H / 2 - v.y) * 0.012;
+            let d = Math.hypot(v.dx, v.dy) || 0.01, m = Math.min(d, t); v.x += v.dx / d * m; v.y += v.dy / d * m;
+        });
+        t *= 0.965;
+    }
+}
+
+// cadeia transitiva (dir='in' pré-reqs | 'out' desbloqueia) restrita aos nós do grafo
+function cadeiaGrafo(cod, dir) {
+    const seen = new Set(), st = [cod];
+    while (st.length) {
+        const c = st.pop(), v = D.grafo.get(c); if (!v) continue;
+        v[dir].forEach(x => { if (GRAFO.byCod.has(x) && !seen.has(x)) { seen.add(x); st.push(x); } });
+    }
+    return seen;
+}
+
+function grafoNodeHTML(nd) {
+    const claro = (nd.tipo === 'HUM' || nd.tipo === 'ELE');
+    const badge = nd.status === 'concluida' ? '<text class="gn-badge" x="22" y="-7">✓</text>'
+        : nd.status === 'cursando' ? '<text class="gn-badge" x="22" y="-7">●</text>' : '';
+    const tip = `${esc(nd.d.nome)}\\n${esc(nd.cod)} · ${nd.tipo} · ${nd.d.chTotal}h\\nStatus: ${ROT_STATUS[nd.status]}`
+        + (nd.sem != null ? `\\nPlanejada: ${esc(rotuloSem(nd.sem))}` : '')
+        + `\\nPré-req: ${nd.d.preRequisitos.join(', ') || 'nenhum'}\\n(clique p/ ver a cadeia)`;
+    return `<g class="gn tipo-${nd.tipo} st-${nd.status}" data-grafo-node="${esc(nd.cod)}" transform="translate(${nd.x.toFixed(1)},${nd.y.toFixed(1)})" data-tip="${tip}">`
+        + `<rect x="${-NODE_HALF}" y="-13" width="${NODE_HALF * 2}" height="26" rx="6"></rect>`
+        + `<text class="gn-lbl" x="0" y="1" fill="${claro ? '#fff' : '#06122b'}">${esc(nd.cod)}</text>${badge}</g>`;
+}
+function grafoEdgeHTML(e) {
+    const a = GRAFO.byCod.get(e.from), b = GRAFO.byCod.get(e.to); if (!a || !b) return '';
+    let dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+    const x1 = (a.x + ux * 20).toFixed(1), y1 = (a.y + uy * 15).toFixed(1), x2 = (b.x - ux * 36).toFixed(1), y2 = (b.y - uy * 16).toFixed(1);
+    return `<line class="ge" data-from="${esc(e.from)}" data-to="${esc(e.to)}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#grafo-seta)"></line>`;
+}
+
+function grafoLegendaHTML() {
+    const areas = [['OBR', 'Obrigatória', '--obr'], ['TRI', 'Trilha', '--trilha']];
+    return `<div class="grafo-legend">
+<div><b>Área (cor)</b><div class="row" style="margin-top:4px">${areas.map(([, t, v]) => `<span><i style="background:var(${v})"></i>${t}</span>`).join('')}</div></div>
+<div><b>Status (borda)</b><div class="row" style="margin-top:4px">
+    <span><i class="ring" style="border:3px solid var(--success)"></i>Concluída</span>
+    <span><i class="ring" style="border:2.5px dashed #cfe0ff"></i>Cursando</span>
+    <span><i class="ring" style="border:2px solid #fff"></i>Disponível</span>
+    <span><i class="ring" style="border:2px dashed #71809c;opacity:.6"></i>Bloqueada</span>
+</div></div></div>`;
+}
+function grafoPainelVazioHTML() {
+    return `<div class="gp-empty"><h3 style="color:var(--text)">Grafo de pré-requisitos</h3>
+Mostra as <b>obrigatórias</b> e as <b>trilhas</b> e como uma destrava a outra.<br><br>
+• <b>Clique</b> numa matéria para acender a cadeia de pré-requisitos (o que vem antes) e o que ela <b>libera</b> (o que vem depois), e ver os detalhes aqui.<br>
+• <b>Arraste o fundo</b> para mover e use a <b>roda do mouse</b> para zoom.<br>
+• Botão <b>Ajustar</b> reenquadra tudo.</div>`;
+}
+function pintarPainelGrafo(cod) {
+    const el = document.getElementById('grafo-painel'); if (!el) return;
+    const nd = cod && GRAFO.byCod.get(cod);
+    if (!nd) { el.innerHTML = grafoPainelVazioHTML(); return; }
+    const d = nd.d;
+    const preq = d.preRequisitos.length ? d.preRequisitos.map(p => {
+        const ok = D.cursadasBase.has(p) || D.emAndamento.includes(p); const nm = D.byCod.get(p);
+        return `<li>${ok ? '<span style="color:var(--success)">✓</span>' : '<span style="color:var(--secondary)">✗</span>'} <b class="mono">${esc(p)}</b> ${nm ? esc(nm.nome) : ''}</li>`;
+    }).join('') : '<li class="muted">nenhum</li>';
+    const vout = D.grafo.get(cod); const out = vout ? [...vout.out].filter(c => GRAFO.byCod.has(c)) : [];
+    const desbloq = out.length ? out.map(c => { const nm = D.byCod.get(c); return `<li><b class="mono">${esc(c)}</b> ${nm ? esc(nm.nome) : ''}</li>`; }).join('') : '<li class="muted">nenhuma</li>';
+    el.innerHTML = `<button class="btn btn-sm btn-ghost" id="grafo-limpar" style="float:right">Limpar ✕</button>
+<h3>${esc(d.nome)}</h3>
+<div class="muted mono" style="font-size:12px">${esc(cod)} · <span class="tag ${nd.tipo}">${nd.tipo}</span> · ${d.chTotal}h${d.chExt > 0 ? (' · ext ' + d.chExt + 'h') : ''}</div>
+<div class="gp-status st-${nd.status}">${ROT_STATUS[nd.status]}${nd.sem != null ? ` · planejada p/ ${esc(rotuloSem(nd.sem))}` : ''}</div>
+<h4>Pré-requisitos (${d.preRequisitos.length})</h4><ul class="gp-list">${preq}</ul>
+<h4>Libera / desbloqueia (${out.length})</h4><ul class="gp-list">${desbloq}</ul>`;
+}
+
+function selecionarNoGrafo(cod) {
+    if (!GRAFO) return;
+    GRAFO.sel = cod || null;
+    const svg = document.getElementById('grafo-svg'); if (!svg) return;
+    const nodes = svg.querySelectorAll('.gn'), edges = svg.querySelectorAll('.ge');
+    if (!cod) { nodes.forEach(n => n.classList.remove('dim', 'hot', 'sel')); edges.forEach(e => e.classList.remove('dim', 'hot')); pintarPainelGrafo(null); return; }
+    const anc = cadeiaGrafo(cod, 'in'), desc = cadeiaGrafo(cod, 'out'), rel = new Set([cod, ...anc, ...desc]);
+    nodes.forEach(n => { const c = n.dataset.grafoNode; n.classList.toggle('sel', c === cod); n.classList.toggle('hot', rel.has(c) && c !== cod); n.classList.toggle('dim', !rel.has(c)); });
+    edges.forEach(e => { const on = rel.has(e.dataset.from) && rel.has(e.dataset.to); e.classList.toggle('hot', on); e.classList.toggle('dim', !on); });
+    pintarPainelGrafo(cod);
+}
+
+function grafoApplyView() { const cam = document.getElementById('grafo-cam'); if (cam && GRAFO) cam.setAttribute('transform', `translate(${GRAFO.view.x},${GRAFO.view.y}) scale(${GRAFO.view.k})`); }
+function grafoFit() {
+    const svg = document.getElementById('grafo-svg'); if (!svg || !GRAFO || !GRAFO.nodes.length) return;
+    const xs = GRAFO.nodes.map(n => n.x), ys = GRAFO.nodes.map(n => n.y);
+    const minx = Math.min(...xs) - NODE_HALF - 20, maxx = Math.max(...xs) + NODE_HALF + 20, miny = Math.min(...ys) - 30, maxy = Math.max(...ys) + 30;
+    const w = Math.max(1, maxx - minx), h = Math.max(1, maxy - miny), r = svg.getBoundingClientRect();
+    const k = Math.max(0.2, Math.min(2, Math.min(r.width / w, r.height / h)));
+    GRAFO.view.k = k; GRAFO.view.x = (r.width - w * k) / 2 - minx * k; GRAFO.view.y = (r.height - h * k) / 2 - miny * k;
+    grafoApplyView();
+}
+window.__grafoFit = grafoFit;
+
+let _grafoMove = null, _grafoUp = null;
+function wireGrafo() {
+    const svg = document.getElementById('grafo-svg'); if (!svg) return;
+    let panning = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    svg.addEventListener('mousedown', e => { if (e.target.closest('.gn')) return; panning = true; sx = e.clientX; sy = e.clientY; ox = GRAFO.view.x; oy = GRAFO.view.y; svg.classList.add('panning'); });
+    const move = e => { if (!panning) return; GRAFO.view.x = ox + (e.clientX - sx); GRAFO.view.y = oy + (e.clientY - sy); grafoApplyView(); };
+    const up = () => { if (panning) { panning = false; svg.classList.remove('panning'); } };
+    if (_grafoMove) window.removeEventListener('mousemove', _grafoMove);
+    if (_grafoUp) window.removeEventListener('mouseup', _grafoUp);
+    _grafoMove = move; _grafoUp = up;
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+    svg.addEventListener('wheel', e => {
+        e.preventDefault(); const r = svg.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+        const k2 = Math.max(0.2, Math.min(3, GRAFO.view.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+        GRAFO.view.x = mx - (mx - GRAFO.view.x) * (k2 / GRAFO.view.k); GRAFO.view.y = my - (my - GRAFO.view.y) * (k2 / GRAFO.view.k); GRAFO.view.k = k2; grafoApplyView();
+    }, { passive: false });
+}
+
+function renderGrafo() {
+    if (!D.matriz) { S.fase = 'upload'; return render(); }
+    GRAFO = grafoDados();
+    layoutForca(GRAFO, 1280, 820, 340);
+    const edgesSVG = GRAFO.edges.map(grafoEdgeHTML).join('');
+    const nodesSVG = GRAFO.nodes.map(grafoNodeHTML).join('');
+    const cont = GRAFO.nodes.reduce((a, n) => { a[n.status] = (a[n.status] || 0) + 1; return a; }, {});
+    root.innerHTML = `
+<div class="topbar">
+<button class="btn btn-sm btn-ghost" id="voltar-plano">← Voltar ao planejador</button>
+<div class="logo">C+</div><div class="who">🗺️ Grafo de matérias</div>
+<div class="meta">
+    <span class="muted" style="font-size:12px">${GRAFO.nodes.length} matérias (obrig.+trilhas) · ${cont.concluida || 0} concl. · ${cont.cursando || 0} cursando · ${cont.disponivel || 0} disp. · ${cont.bloqueada || 0} bloq.</span>
+    <button class="btn btn-sm btn-ghost" id="grafo-ajustar">Ajustar</button>
+</div>
+</div>
+<div class="grafo-wrap">
+<div class="grafo-canvas">
+    <svg id="grafo-svg" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="grafo-seta" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5a6b8c"></path></marker></defs>
+    <g id="grafo-cam"><g id="grafo-edges">${edgesSVG}</g><g id="grafo-nodes">${nodesSVG}</g></g>
+    </svg>
+    ${grafoLegendaHTML()}
+</div>
+<aside class="grafo-painel" id="grafo-painel">${grafoPainelVazioHTML()}</aside>
+</div>`;
+    wireGrafo();
+    requestAnimationFrame(grafoFit);
+}
+
+/* ===================================================================
+    APP principal
+    =================================================================== */
+function renderApp() {
+    const al = D.hist.aluno;
+    const proj = D.projecao;
+    if (S.abaAtiva >= proj.length) S.abaAtiva = proj.length - 1;
+    const sem = proj[S.abaAtiva];
+    const restantes = proj.filter(s => s.idx > 0 && !s.formatura).length + (proj.some(s => s.formatura) ? 1 : 0);
+    root.innerHTML = `
+<div class="topbar">
+<button class="btn btn-sm btn-ghost" id="toggle-side">☰</button>
+<div class="logo">C+</div><div class="who">${esc(al.nome || 'Aluno')}</div>
+<div class="meta">
+    <div class="stat"><b>${(al.coeficienteAbsoluto || 0).toFixed(4)}</b><span>Coef. absoluto</span></div>
+    <div class="stat"><b>${proj.length - 1}</b><span>Semestres projetados</span></div>
+    <div class="stat"><b>${D.hist.aluno.periodoAtual}º</b><span>Período atual</span></div>
+    <button class="btn btn-sm btn-ghost" data-editar-pref>⚙️ Preferências</button>
+    <button class="btn btn-sm btn-ghost" id="ver-grafo">🗺️ Grafo de matérias</button>
+    <button class="btn btn-sm btn-danger" id="reiniciar">Reiniciar tudo</button>
+</div>
+</div>
+<div class="layout">
+<aside class="sidebar ${S.sidebarCollapsed ? 'collapsed' : ''}" id="sidebar">${sidebarHTML(sem)}</aside>
+<main class="main">
+    <div class="tabs">${proj.map((s, i) => tabHTML(s, i)).join('')}</div>
+    ${semestreHTML(sem)}
+</main>
+</div>`;
+}
+
+function sidebarHTML(sem) {
+    const h = sem.horas;
+    const row = (label, obj, cls = '', help = '') => {
+        const pct = obj.total ? Math.min(100, Math.round(obj.cursada / obj.total * 100)) : 100;
+        return `<tr class="${obj.faltante === 0 ? 'done' : ''} ${cls}">
+    <td class="area">${esc(label)}${help ? `<span class="q-help" data-tip="${esc(help)}">?</span>` : ''}
+    <div class="bar"><i style="width:${pct}%;background:${obj.faltante === 0 ? 'var(--success)' : 'var(--primary)'}"></i></div></td>
+    <td>${obj.total}h</td><td>${obj.faltante === 0 ? '<span style="color:var(--success)">✓</span>' : obj.faltante + 'h'}</td></tr>`;
+    };
+    const sub = h.subStatus;
+    const trilhaRows = Object.keys(sub).filter(id => sub[id].cursada > 0 || S.preferencias.preferenciaTrilhas.indexOf(id) < 3)
+        .map(id => `<tr class="sub2 ${sub[id].faltante === 0 ? 'done' : ''}"><td>↳ ${esc(sub[id].nome)} ${sub[id].validada ? '<span style="color:var(--success)">✓</span>' : ''}</td><td>${K.REQUISITOS.trilhaMin}h</td><td>${sub[id].faltante}h</td></tr>`).join('');
+    return `
+<div class="side-sec">
+<h4>📊 Horas faltantes <span class="muted" style="text-transform:none;font-weight:400">· ao fim de ${sem.rotulo}</span></h4>
+<table class="htable"><tbody>
+    ${row('Obrigatórias', h.obrigatorias, '', 'Disciplinas obrigatórias da matriz, incluindo estágios e TCC.')}
+    ${row('Optativas (total)', h.optativasTotal, '', 'Soma de Segundo Estrato, Humanidades e Trilhas.')}
+    <tr class="sub ${h.conj1159.faltante === 0 ? 'done' : ''}"><td>↳ Segundo Estrato [1159]</td><td>${h.conj1159.total}h</td><td>${h.conj1159.faltante || '✓'}${h.conj1159.faltante ? 'h' : ''}</td></tr>
+    <tr class="sub ${h.conj1161.faltante === 0 ? 'done' : ''}"><td>↳ Humanidades [1161]</td><td>${h.conj1161.total}h</td><td>${h.conj1161.faltante || '✓'}${h.conj1161.faltante ? 'h' : ''}</td></tr>
+    <tr class="sub ${h.trilhas.faltante === 0 ? 'done' : ''}"><td>↳ Trilhas [1160] · ${h.trilhas.validadas}/3 validadas</td><td>${h.trilhas.total}h</td><td>${h.trilhas.faltante}h</td></tr>
+    ${trilhaRows}
+    ${row('Eletivas', h.eletivas, '', 'Qualquer disciplina da UTFPR. Registre manualmente abaixo.')}
+    ${row('Extensão', h.extensao, '', '330h: 60h via Trab. de Integração 1 + 270h de CCE/optativas extensionistas.')}
+    ${row('Complementares', h.complementares, '', 'Atividades Complementares (ICSX50).')}
+</tbody></table>
+</div>
+<div class="side-sec">
+<h4>🧩 Itens não presenciais / manuais</h4>
+${manuaisHTML()}
+</div>
+<div class="side-sec">
+<h4>⚙️ Preferências</h4>
+<button class="btn btn-sm btn-ghost" data-editar-pref style="width:100%">Editar campus, turnos, faixa e bloqueios</button>
+<div class="muted" style="font-size:11px;margin-top:8px">Campus: ${S.preferencias.campusUnico ? S.preferencias.campus : 'Qualquer'} · Turnos: ${S.preferencias.turnos.join(' ')} · Carga: ${S.preferencias.cargaMin}–${S.preferencias.cargaMax} · Bloqueios: ${totalBloqueios()}</div>
+</div>`;
+}
+
+function manuaisHTML() {
+    const m = S.manuais;
+    const opts = D.projecao.map(s => `<option value="${s.idx}">${s.rotulo}</option>`).join('');
+    const optsSel = sel => D.projecao.map(s => `<option value="${s.idx}" ${(+sel === s.idx) ? 'selected' : ''}>${s.rotulo}</option>`).join('');
+    const estagioRow = (cod, nome) => {
+        const done = m.estagios[cod] != null;
+        return `<div class="spread" style="margin-bottom:8px">
+    <div><div style="font-size:12px;font-weight:600">${esc(nome)}</div><div class="muted" style="font-size:10px">${esc(cod)} · 200h</div></div>
+    ${done
+                ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ ${rotuloSem(m.estagios[cod])}</span><button class="btn btn-sm btn-ghost" data-manual="estagio-undo" data-cod="${cod}">✗</button></div>`
+                : `<div class="flx"><select class="manual-sel" data-cod="${cod}" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select><button class="btn btn-sm btn-primary" data-manual="estagio-do" data-cod="${cod}">Concluir</button></div>`}
+</div>`;
+    };
+    return `
+${estagioRow('ICSX51', 'Estágio 1')}
+${estagioRow('ICSX52', 'Estágio 2')}
+<div class="spread" style="margin-bottom:8px">
+    <div><div style="font-size:12px;font-weight:600">Eletivas externas</div><div class="muted" style="font-size:10px">meta 105h · conta a partir de</div></div>
+    <div class="flx"><input type="number" min="0" max="300" value="${m.eletiva.h || 0}" data-manualnum="eletiva" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
+    <select data-manualsem="eletiva" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.eletiva.sem)}</select></div>
+</div>
+<div class="spread" style="margin-bottom:8px">
+    <div><div style="font-size:12px;font-weight:600">Extensão (CCE)</div><div class="muted" style="font-size:10px">faltam 270h · conta a partir de</div></div>
+    <div class="flx"><input type="number" min="0" max="330" value="${m.extensao.h || 0}" data-manualnum="extensao" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
+    <select data-manualsem="extensao" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.extensao.sem)}</select></div>
+</div>
+<div class="spread">
+    <div><div style="font-size:12px;font-weight:600">ENADE Concluinte</div><div class="muted" style="font-size:10px">requisito de formatura</div></div>
+    ${m.enade.done
+            ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ ${rotuloSem(m.enade.sem)}</span><button class="btn btn-sm btn-ghost" data-manual="enade-undo">✗</button></div>`
+            : `<div class="flx"><select data-manualsem="enade" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select><button class="btn btn-sm btn-primary" data-manual="enade-do">Marcar</button></div>`}
+</div>`;
+}
+
+function tabHTML(s, i) {
+    const st = s.formatura ? 'formatura' : s.status;
+    const lbl = s.formatura ? '🎓 Formatura' : s.status === 'atual' ? 'atual' : s.status === 'confirmado' ? 'confirmado ✓' : 'futuro (est.)';
+    return `<button class="tab ${st} ${i === S.abaAtiva ? 'active' : ''}" data-tab="${i}">
+<span class="ttl">${s.rotulo}</span><span class="tst">${lbl}</span></button>`;
+}
+
+function semestreHTML(sem) {
+    if (sem.idx === 0) return semAtualHTML(sem);
+    if (sem.formatura) return formaturaHTML(sem) + planoSemestreHTML(sem);
+    return planoSemestreHTML(sem);
+}
+
+function semAtualHTML(sem) {
+    const sel = sem.grade.sel;
+    return `
+<div class="sem-head"><h2>${sem.rotulo} — Semestre atual</h2><span class="chip" style="color:var(--secondary)">Em andamento</span></div>
+<div class="banner info">ℹ️ Estas são suas disciplinas matriculadas em ${sem.rotulo} (histórico). Elas aparecem como <b>em andamento</b> e não são editáveis. A projeção dos próximos semestres assume que serão aprovadas.</div>
+<div class="gcard open"><div class="gh"><div><div class="gtitle">Disciplinas em andamento</div><div class="gsub">${sel.length} disciplinas · ${sel.reduce((a, s) => a + (s.disciplina.chSemanal || 0), 0)} aulas/sem</div></div></div>
+<div class="gbody">${sel.map(s => discRowHTML(s)).join('')}</div></div>
+${calendarHTML(sem, sel)}
+${legendaHTML()}`;
+}
+
+function planoSemestreHTML(sem) {
+    const escolhida = sem.grade;
+    const banners = [];
+    if (sem.status !== 'confirmado') banners.push(`<div class="banner warn">⚠ Grade estimada — sem dados reais de oferta para ${sem.rotulo}. Baseada nas Turmas Abertas 2026/1; será refinada quando você carregar as Turmas Abertas do semestre. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-upd-gnh="${sem.idx}">Atualizar Turmas Abertas</button></span></div>`);
+    if (sem.inviavel) banners.push(`<div class="banner warn">⚠ Não há disciplinas suficientes na oferta para atingir o mínimo de ${S.preferencias.cargaMin}. Mostrando a melhor grade possível.</div>`);
+    // rascunho banner
+    const blocos = sem.bloqueios || [];
+    const rasc = escolhida.sel.filter(s => s.bloqueado);
+    rasc.forEach(s => {
+        const blkSlots = s.horarios.filter(h => blocos.some(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot));
+        const nomesBlk = [...new Set(blkSlots.map(h => { const b = blocos.find(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot); return b ? b.nome : ''; }))].join(', ');
+        banners.push(`<div class="banner warn">⚠ <b>“${esc(s.disciplina.nome)}”</b> ocupa o horário travado <b>${esc(nomesBlk)}</b> em ${sem.rotulo}. Resolva o conflito para que ela conte nos próximos semestres.
+    <span class="b-actions"><button class="btn btn-sm btn-ghost" data-rm-rasc="${s.disciplina.codigo}">Remover da grade</button><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Editar bloqueio</button></span></div>`);
+    });
+    // trabalho: conflito de núcleo / déficit semanal na grade escolhida
+    const tw = K.normTrab(trabDoSem(sem.idx)); const tb = sem.trab;
+    if (tw.trabalha && (+tw.horas > 0) && tb && escolhida.sel.length) {
+        if (tb.conflitosNucleo > 0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>núcleo obrigatório de trabalho</b> em ${sem.rotulo}. ${tw.flexivel ? 'Mesmo flexível, o núcleo precisa estar livre.' : 'Ative “horários flexíveis” ou ajuste a janela para encaixar.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        else if (tb.rigidConf > 0) banners.push(`<div class="banner warn">⚠ ${tb.rigidConf} dia(s) <b>não-flexível(is)</b> têm aula sobre o seu horário preferido em ${sem.rotulo}. Marque esse(s) dia(s) como flexível(is) para o trabalho se ajustar, ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        else if (tb.deficit > 1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${tw.horas}h). ${tw.flexivel ? 'O sistema priorizou as grades que mais aproveitam sua flexibilidade.' : 'Considere ligar “horários flexíveis” para variar as horas por dia.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+    }
+
+    const editorAberto = S.editor && S.editor.idx === sem.idx;
+    const cards = [...sem.grades.map((g, i) => gradeCardHTML(g, i, sem)), ...(sem.personalizadas || []).map((g, i) => gradeCardHTML(g, 'p' + i, sem, true))];
+    const montarCard = `<div class="gcard montar" data-montar="${sem.idx}"><div class="gh"><div><div class="gtitle">➕ Montar grade personalizada</div><div class="gsub">crie do zero — ou use “✏️ Editar” numa grade acima</div></div><div class="score" style="font-size:20px">＋</div></div></div>`;
+    const temGrades = sem.grades && sem.grades.length;
+    const headAcoes = sem.status === 'confirmado'
+        ? `<span class="chip" style="color:var(--success)">confirmado ✓</span> <button class="btn btn-sm btn-ghost" data-desconfirmar="${sem.idx}">Refazer</button>`
+        : `<span class="chip">futuro estimado</span>${temGrades ? ` <button class="btn btn-sm btn-primary" data-escolher="0">✓ Confirmar grade sugerida</button>` : ''}`;
+    // cronograma: durante a edição mostra a grade em edição (prévia ao vivo); senão, a grade ativa
+    const calSel = editorAberto ? editorSel(sem) : escolhida.sel;
+    const calSem = editorAberto ? Object.assign({}, sem, { trab: trabCalc(sem.idx, calSel) }) : sem;
+    return `
+<div class="sem-head"><h2>${sem.rotulo} ${sem.formatura ? '🎓' : ''}</h2>
+<div class="flx">${headAcoes}</div>
+</div>
+${banners.join('')}
+${(calSel.length || editorAberto) ? calendarHTML(calSem, calSel, editorAberto) : ''}
+${(calSel.length || editorAberto) ? legendaHTML() : ''}
+${blocosSemestreHTML(sem)}
+<h3 style="margin:22px 0 6px;font-size:15px">🎲 Grades possíveis ${sem.status === 'confirmado' ? '<span class="muted" style="font-weight:400;font-size:12px">— escolha outra para trocar</span>' : '<span class="muted" style="font-weight:400;font-size:12px">— confirme a sugerida acima ou escolha/edite outra</span>'}</h3>
+${editorAberto ? editorHTML(sem) : ''}
+<div class="grades">${(cards.length ? cards.join('') : '<div class="banner info">Nenhuma grade gerada para este semestre.</div>')}${editorAberto ? '' : montarCard}</div>`;
+}
+
+function gradeCardHTML(g, i, sem, custom) {
+    const isSel = sem.status === 'confirmado' && sameGrade(g, sem.grade);
+    const rec = i === 0 && !custom;
+    const aulas = g.sel.reduce((a, s) => a + (s.disciplina.chSemanal || 0), 0);
+    const nblk = g.sel.filter(s => s.bloqueado).length;
+    const open = (typeof i === 'number' && i === 0) || isSel;
+    const escolhida = sem.status === 'confirmado' && sameGrade(g, sem.grade);
+    return `<div class="gcard ${rec ? 'rec' : ''} ${isSel ? 'sel' : ''} ${open ? 'open' : ''}" data-card="${i}">
+<div class="gh" data-toggle-card="${i}">
+    <div><div class="gtitle">${custom ? 'Grade personalizada' : 'Grade #' + (i + 1)}${rec ? ' <span class="chip" style="color:var(--secondary)">Recomendada</span>' : ''}</div>
+    <div class="gsub">${g.sel.length} disciplinas · ${aulas} aulas/sem · ${nblk ? ('<span style="color:var(--secondary)">' + nblk + ' em conflito</span>') : 'sem conflitos'}</div></div>
+    <div class="score">${typeof g.score === 'number' ? ('<span class="dot"></span> Score: ' + g.score) : ''}</div>
+</div>
+<div class="gbody">
+    ${g.sel.map(s => discRowHTML(s)).join('')}
+    <div class="gactions">
+    ${escolhida ? '<span class="chip" style="color:var(--success)">✓ Grade escolhida</span>' : `<button class="btn btn-sm btn-primary" data-escolher="${i}">Escolher esta grade</button>`}
+    <button class="btn btn-sm btn-ghost" data-editar="${i}" data-sem="${sem.idx}">✏️ Editar</button>
+    ${custom ? `<button class="btn btn-sm btn-ghost" data-del-custom="${String(i).slice(1)}" data-sem="${sem.idx}" title="Excluir esta grade personalizada">🗑</button>` : ''}
+    </div>
+</div></div>`;
+}
+function sameGrade(a, b) { if (!a || !b) return false; const ka = a.sel.map(s => s.disciplina.codigo).sort().join(','); const kb = b.sel.map(s => s.disciplina.codigo).sort().join(','); return ka === kb && ka.length > 0; }
+
+function discRowHTML(s) {
+    const d = s.disciplina; const tp = tipoDe(d);
+    const tag = tp === 'OBR' ? 'OBR' : tp === 'HUM' ? 'HUM' : tp === 'TRI' ? 'TRI' : tp === 'OPT' ? 'OPT' : 'ELE';
+    const turno = s.horarios.length ? [...new Set(s.horarios.map(h => h.periodo))].join('') : '—';
+    const reg = D.hist.cursadas.find(c => c.codigo === d.codigo);
+    const reprov = reg && reg.situacao === 'REPROVADO';
+    const prereqInfo = d.preRequisitos.map(p => `${p} ${(D.cursadasFinal && D.cursadasFinal.has(p)) ? '✓' : '•'}`).join(', ');
+    const tip = `${esc(d.nome)}\\nCódigo: ${esc(d.codigo)}\\n${s.turma ? ('Turma ' + esc(s.turma.turma) + (s.turma.professor ? (' · ' + esc(s.turma.professor)) : '')) : ''}\\n${s.horarios.map(h => `${K.DIAS[h.diaSemana].slice(0, 3)} ${h.periodo}${h.slot} (${esc(h.sala || '')})`).join(', ')}\\nPré-req: ${prereqInfo || 'nenhum'}\\n${d.chExt > 0 ? ('Extensionista: ' + d.chExt + 'h') : ''}`;
+    return `<div class="disc-row ${s.bloqueado ? 'rascunho' : ''} ${s.andamento ? '' : ''}" data-tip="${esc(tip)}">
+${s.andamento ? '<span style="color:var(--secondary)">●</span>' : (s.bloqueado ? '<span style="color:var(--secondary)">⚠</span>' : '<span style="color:var(--success)">✓</span>')}
+<span class="code">${esc(d.codigo)}</span>
+<span class="nm">${esc(d.nome)}${reprov ? ' <span class="muted" style="font-size:10px">(reprovada antes)</span>' : ''}</span>
+${d.chExt > 0 ? '<span class="ext-dot" title="Extensionista"></span>' : ''}
+<span class="tag ${tag}">${tag}</span><span class="tag turno">${turno}</span>
+<span class="muted mono" style="font-size:11px">${d.chSemanal}h/sem</span>
+</div>`;
+}
+
+/* ---------- Cronograma semanal ---------- */
+function calendarHTML(sem, sel, editando) {
+    const grid = {};
+    const blocos = sem.bloqueios || [];
+    const put = (h, data) => { grid[h.diaSemana + '-' + h.periodo + '-' + h.slot] = data; };
+    // bloqueios
+    for (const b of blocos) put(b, { tipo: 'blk', nome: b.nome });
+    // disciplinas
+    for (const s of sel) {
+        const tp = s.andamento ? 'andamento' : tipoDe(s.disciplina);
+        for (const h of s.horarios) {
+            const blk = blocos.some(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot);
+            const ev = {
+                tipo: s.bloqueado || blk && !s.andamento ? 'rascunho' : tp, nome: s.disciplina.nome, code: s.disciplina.codigo,
+                sala: h.sala, prof: s.turma ? s.turma.professor : '', ext: s.disciplina.chExt > 0, rascunho: s.bloqueado
+            };
+            if (!grid[h.diaSemana + '-' + h.periodo + '-' + h.slot] || grid[h.diaSemana + '-' + h.periodo + '-' + h.slot].tipo === 'blk')
+                put(h, ev);
+        }
+    }
+    // trabalho (precisão de minutos) — só em células livres de aula/bloqueio
+    const ivAll = (sem.trab && sem.trab.intervalos) || {};
+    for (const b of ((sem.trab && sem.trab.slots) || [])) {
+        const key = b.diaSemana + '-' + b.periodo + '-' + b.slot;
+        if (grid[key]) continue;
+        grid[key] = { tipo: 'trab', iv: ivAll[b.diaSemana] };
+    }
+    const periods = [['M', 6], ['T', 6], ['N', 5]];
+    let rows = '';
+    periods.forEach(([per, n], pi) => {
+        for (let s = 1; s <= n; s++) {
+            const hora = K.slotTexto(per, s);
+            rows += `<tr><td class="tlbl" data-tip="${per}${s} · ${hora}">${per}${s}</td>`;
+            for (let d = 2; d <= 7; d++) {
+                const quando = `${K.DIAS[d]} ${per}${s} · ${hora}`;
+                const e = grid[d + '-' + per + '-' + s];
+                if (!e) { rows += `<td class="cell" data-tip="${quando}\\n(horário livre)"></td>`; continue; }
+                if (e.tipo === 'blk') { rows += `<td class="cell"><div class="ev blk" data-tip="${quando}\\nBloqueio: ${esc(e.nome)}">${esc(e.nome.slice(0, 10))}</div></td>`; continue; }
+                if (e.tipo === 'trab') { const faixa = e.iv ? `${K.fmtHHMM(e.iv.startMin)}–${K.fmtHHMM(e.iv.endMin)}` : ''; const dur = e.iv ? K.fmtDur(e.iv.horas) : ''; rows += `<td class="cell"><div class="ev trab" data-tip="${quando}\\nTrabalho ${faixa} · ${dur}">Trabalho<div class="c">${dur}</div></div></td>`; continue; }
+                const cls = e.rascunho ? 'rascunho' : e.tipo;
+                const tip = `${esc(e.nome)}\\n${esc(e.code)}${e.prof ? (' · ' + esc(e.prof)) : ''}\\n${quando}\\nSala ${esc(e.sala || '')}${e.rascunho ? '\\n⚠ Em conflito com bloqueio' : ''}`;
+                rows += `<td class="cell"><div class="ev ${cls} ${e.ext ? 'ext' : ''}" data-tip="${esc(tip)}">${e.rascunho ? '<span class="warn">⚠</span>' : ''}<div>${esc(e.code)}</div><div class="c">${esc(e.sala || '')}</div></div></td>`;
+            }
+            rows += '</tr>';
+        }
+        if (pi < 2) rows += '<tr class="sep"><td colspan="7"></td></tr>';
+    });
+    return `<h3 style="margin:22px 0 0;font-size:15px">🗓️ Cronograma semanal ${editando ? '<span class="chip" style="color:var(--primary)">✏️ prévia da grade em edição</span>' : ''}</h3>
+<div class="cal-wrap ${editando ? 'editando' : ''}"><table class="cal"><thead><tr><th></th>${[2, 3, 4, 5, 6, 7].map(d => `<th>${K.DIAS[d]}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function legendaHTML() {
+    const it = [['OBR', 'Obrigatória', 'var(--obr)'], ['HUM', 'Humanidades', 'var(--hum)'], ['OPT', 'Segundo Estrato', 'var(--estrato)'], ['TRI', 'Trilha', 'var(--trilha)'], ['ELE', 'Eletiva', 'var(--elet)'], ['andamento', 'Em andamento', '#39507a']];
+    return `<div class="legend">${it.map(([c, t, col]) => `<span><i style="background:${col}"></i>${t}</span>`).join('')}
+<span><i style="background:repeating-linear-gradient(45deg,#5a4a22,#5a4a22 4px,#46391a 4px,#46391a 8px)"></i>Rascunho (conflito)</span>
+<span><i style="background:repeating-linear-gradient(45deg,#3a3550,#3a3550 4px,#2c2840 4px,#2c2840 8px)"></i>Bloqueio</span>
+<span><i style="background:repeating-linear-gradient(45deg,#2b3a52,#2b3a52 4px,#22324a 4px,#22324a 8px)"></i>Trabalho</span>
+<span><i style="box-shadow:inset 0 0 0 2px var(--ext);background:transparent"></i>Extensionista</span></div>`;
+}
+
+/* ---------- Personalização ---------- */
+/* ---------- Editor de grade (Personalizar / Editar qualquer grade) ---------- */
+function turmasDe(cod, sem) { const c = (sem.candidatas || []).find(x => x.disciplina.codigo === cod); return c ? c.turmas : []; }
+// seleção atual do editor no formato do cronograma (para a prévia ao vivo)
+function editorSel(sem) {
+    const ed = S.editor; if (!ed) return [];
+    return ed.codigos.map(cod => { const d = D.byCod.get(cod); const t = turmaDe(cod, ed.turmas[cod]); return { disciplina: d, turma: t, horarios: t ? t.horarios : [], bloqueado: t ? K.bloqueado(t.horarios, sem.bloqueios || []) : false }; }).filter(x => x.disciplina);
+}
+function editorOcup(sem, exclCod) {
+    const ed = S.editor, ocup = [];
+    for (const cod of ed.codigos) { if (cod === exclCod) continue; const t = turmaDe(cod, ed.turmas[cod]); if (t) ocup.push(...t.horarios); }
+    return ocup;
+}
+function motivoConflito(horarios, sem, ocup) {
+    for (const h of horarios) if (ocup.some(o => o.diaSemana === h.diaSemana && o.periodo === h.periodo && o.slot === h.slot)) return 'Conflita com outra matéria da grade';
+    const blocos = sem.bloqueios || [];
+    for (const h of horarios) { const b = blocos.find(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot); if (b) return 'Conflita com o bloqueio “' + b.nome + '”'; }
+    const ts = (sem.trab && sem.trab.slots) || [];
+    for (const h of horarios) if (ts.some(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot)) return 'Conflita com o horário de trabalho';
+    return null;
+}
+function horResumo(t) { return t.horarios && t.horarios.length ? t.horarios.map(h => K.DIAS[h.diaSemana].slice(0, 3) + ' ' + h.periodo + h.slot).join(' ') : 'sem horário'; }
+function turmaChip(cod, t, sem, sel, ocup) {
+    const reason = motivoConflito(t.horarios || [], sem, ocup);
+    const prio = t.prioridadeSI != null ? ` · prioridade ${t.prioridadeSI}` : '';
+    const tip = `Turma ${esc(t.turma)}${t.reserva ? (' · ' + esc(t.reserva)) : ''}${prio}\\n${esc(horResumo(t))}${t.professor ? ('\\nProf. ' + esc(t.professor)) : ''}${reason ? ('\\n⛔ ' + esc(reason)) : ''}`;
+    const attrs = reason ? `data-tip="${tip}"` : `data-ed-turma="${esc(cod)}" data-turma="${esc(t.turma)}" data-sem="${sem.idx}" data-tip="${tip}"`;
+    return `<span class="ed-turma ${sel ? 'sel ' : ''}${reason ? 'conflito' : ''}" ${attrs}>${esc(t.turma)} <span class="muted">${esc(horResumo(t))}</span></span>`;
+}
+function editorHTML(sem) {
+    const ed = S.editor; if (!ed || ed.idx !== sem.idx) return '';
+    const proxIdx = (D.projecao.find(s => s.idx > 0) || {}).idx;
+    const ehProximo = sem.idx === proxIdx;
+    const selRaw = ed.codigos.map(cod => { const d = D.byCod.get(cod); const t = turmaDe(cod, ed.turmas[cod]); return { disciplina: d, turma: t, horarios: t ? t.horarios : [] }; }).filter(x => x.disciplina);
+    const score = K.pontuarSel(D.ctx, selRaw, sem.cursadasAntes || new Set(), sem.faltObrig || new Set(), S.preferencias, sem.bloqueios || [], trabDoSem(sem.idx));
+    const nConf = selRaw.filter(s => motivoConflito(s.horarios, sem, editorOcup(sem, s.disciplina.codigo))).length;
+    const rows = ed.codigos.map(cod => {
+        const d = D.byCod.get(cod); if (!d) return '';
+        const turmas = turmasDe(cod, sem); const ocup = editorOcup(sem, cod);
+        const chips = turmas.map(t => turmaChip(cod, t, sem, ed.turmas[cod] === t.turma, ocup)).join('');
+        let substBox = '';
+        if (ed.subst === cod) {
+            const mesmaArea = (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo) && tipoDe(c.disciplina) === tipoDe(d));
+            const subs = mesmaArea.length ? mesmaArea : (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo));
+            const lista = subs.map(c => `<span class="ed-sub" data-ed-substituir="${esc(cod)}" data-novo="${esc(c.disciplina.codigo)}" data-sem="${sem.idx}">${esc(c.disciplina.codigo)} ${esc(c.disciplina.nome)}</span>`).join('') || '<span class="muted">sem substitutas disponíveis</span>';
+            substBox = `<div class="ed-subbox"><div class="muted" style="margin-bottom:4px">Substituir “${esc(d.nome)}” por uma matéria disponível:</div>${lista}</div>`;
+        }
+        return `<div class="ed-row">
+    <div class="ed-rowh"><button class="ed-x" data-ed-rm="${esc(cod)}" data-sem="${sem.idx}" title="Remover da grade">✕</button>
+    <span class="code">${esc(cod)}</span><span class="nm">${esc(d.nome)}</span><span class="tag ${tipoDe(d)}">${tipoDe(d)}</span>
+    ${ehProximo ? `<button class="btn btn-sm btn-ghost ed-subbtn ${ed.subst === cod ? 'on' : ''}" data-ed-subst="${esc(cod)}" data-sem="${sem.idx}">↔ Matéria indisponível</button>` : ''}</div>
+    <div class="ed-turmas">${chips || '<span class="muted">sem turma ofertada</span>'}</div>${substBox}</div>`;
+    }).join('');
+    const disp = (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo)).map(c => {
+        const d = c.disciplina; const ocup = editorOcup(sem, null);
+        const chips = c.turmas.map(t => turmaChip(d.codigo, t, sem, false, ocup)).join('');
+        return `<div class="ed-disc"><div class="ed-rowh"><span class="code">${esc(d.codigo)}</span><span class="nm">${esc(d.nome)}</span><span class="tag ${tipoDe(d)}">${tipoDe(d)}</span></div><div class="ed-turmas">${chips || '<span class="muted">sem turma ofertada</span>'}</div></div>`;
+    }).join('');
+    return `<div class="editor" id="editor-${sem.idx}">
+<div class="ed-head"><h3>✏️ ${ed.base ? 'Editando grade' : 'Montar grade'} — ${esc(sem.rotulo)}</h3>
+    <div class="ed-actions"><span class="score"><span class="dot"></span> Score ${score}${nConf ? ` · <span style="color:var(--secondary)">${nConf} em conflito</span>` : ''}</span>
+    <button class="btn btn-sm btn-primary" data-ed-salvar="${sem.idx}" ${ed.codigos.length ? '' : 'disabled'}>Salvar como nova grade personalizada</button>
+    <button class="btn btn-sm btn-ghost" data-ed-limpar="${sem.idx}">Limpar</button>
+    <button class="btn btn-sm btn-ghost" data-ed-fechar="1">Fechar</button></div></div>
+<div class="ed-cols">
+    <div class="ed-col"><div class="ed-coltitle">Na grade (${ed.codigos.length})</div>${rows || '<div class="muted" style="padding:10px">Nenhuma matéria ainda — clique numa turma da lista ao lado para adicionar.</div>'}</div>
+    <div class="ed-col"><div class="ed-coltitle">Disponíveis <span class="muted" style="font-weight:400">— clique numa turma p/ adicionar; turmas riscadas conflitam</span></div>${disp || '<div class="muted" style="padding:10px">Todas as matérias disponíveis já estão na grade.</div>'}</div>
+</div></div>`;
+}
+
+/* ---------- Formatura ---------- */
+function formaturaHTML(sem) {
+    const h = sem.horas; const m = S.manuais;
+    const reqs = [
+        ['Obrigatórias', h.obrigatorias.faltante === 0],
+        ['Segundo Estrato [1159]', h.conj1159.faltante === 0],
+        ['Humanidades [1161]', h.conj1161.faltante === 0],
+        ['3 trilhas validadas + carga', h.trilhas.validadas >= 3 && h.trilhas.faltante === 0],
+        ['Eletivas (105h)', h.eletivas.faltante === 0],
+        ['Extensão (330h)', h.extensao.faltante === 0],
+        ['ENADE Concluinte', m.enade.done],
+        ['TCC 2 (ICSX41)', D.cursadasFinal && D.cursadasFinal.has('ICSX41')],
+    ];
+    return `<div class="formatura-card">
+<div class="badge-grad">🎓</div><h2>Formatura projetada em ${sem.rotulo}!</h2>
+<p class="muted">Todos os critérios de integralização foram satisfeitos nesta projeção.</p>
+<ul class="req-list">${reqs.map(([t, ok]) => `<li><span class="mk">${ok ? '✅' : '⬜'}</span>${t}</li>`).join('')}</ul>
+</div>`;
+}
+
+/* ===================================================================
+    EVENTOS (delegação)
+    =================================================================== */
+root.addEventListener('click', onClick);
+root.addEventListener('input', onInput);
+root.addEventListener('change', onChange);
+document.addEventListener('mousemove', onTipMove);
+root.addEventListener('mousedown', onDragStart);
+root.addEventListener('mouseover', onDragOver);
+document.addEventListener('mouseup', onDragEnd);
+
+async function onClick(e) {
+    const t = e.target;
+    if (t.closest('#abrir-ajuda')) return abrirAjuda();
+    const pick = t.closest('[data-pick]'); if (pick) { $(`[data-input="${pick.dataset.pick}"]`).click(); return; }
+    if (t.closest('#processar')) return processar();
+    if (t.closest('#restaurar')) { S = carregar() || novoEstado(); hidratarPresets(); if (S.fase === 'upload') S.fase = 'upload'; render(); return; }
+
+    // divergências
+    const dv = t.closest('[data-div]');
+    if (dv) { const d = S.divergPendentes.shift(); if (dv.dataset.div === 'yes') S.equivalencias[d.gnhCod] = d.matrizCod; salvar(); render(); return; }
+
+    // preferências
+    const pr = t.closest('[data-pref]'); if (pr) { S.preferencias.campusUnico = !S.preferencias.campusUnico; salvar(); renderPreferencias(); return; }
+    const cs = t.closest('[data-campus]'); if (cs) { S.preferencias.campus = cs.dataset.campus; salvar(); renderPreferencias(); return; }
+    const tu = t.closest('[data-turno]'); if (tu) { const k = tu.dataset.turno; const a = S.preferencias.turnos; const i = a.indexOf(k); if (i >= 0) { if (a.length > 1) a.splice(i, 1); } else a.push(k); salvar(); renderPreferencias(); return; }
+    const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = true; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = false; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const tf = t.closest('[data-trab-flex]'); if (tf) { const i = +tf.dataset.trabFlex; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = !S.trabalho[i].flexivel; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; S.trabalho[i] = K.normTrab(S.trabalho[i]); const a = S.trabalho[i].diasPreferidos, p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho “${p.nome}”?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
+    const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
+    const psav = t.closest('[data-trab-preset-save]'); if (psav) { const i = +psav.dataset.trabPresetSave; const nome = (prompt('Nome desta configuração de trabalho (ex.: "Meio período", "Integral"):', '') || '').trim(); if (nome) { salvarPresetTrab(i, nome); toast('Configuração salva'); } rerenderKeepOpen(); return; }
+    // bloqueio por clique tratado no mousedown/mouseup (suporta arrastar)
+    if (t.closest('#ir-app')) { if (!S.preferencias.turnos.length) { toast('Selecione ao menos um turno'); return; } S.fase = 'app'; S.abaAtiva = 1; salvar(); render(); return; }
+    if (t.closest('#voltar-upload')) { S.fase = 'upload'; render(); return; }
+    if (t.closest('[data-editar-pref]')) { S.fase = 'preferencias'; render(); return; }
+
+    // grafo de matérias
+    if (t.closest('#ver-grafo')) { S.fase = 'grafo'; salvar(); render(); return; }
+    if (t.closest('#voltar-plano')) { S.fase = 'app'; salvar(); render(); return; }
+    const gn = t.closest('[data-grafo-node]'); if (gn) { selecionarNoGrafo(gn.dataset.grafoNode); return; }
+    if (t.closest('#grafo-limpar')) { selecionarNoGrafo(null); return; }
+    if (t.closest('#grafo-ajustar')) { if (window.__grafoFit) window.__grafoFit(); return; }
+
+    // app
+    if (t.closest('#toggle-side')) { S.sidebarCollapsed = !S.sidebarCollapsed; $('#sidebar').classList.toggle('collapsed'); return; }
+    if (t.closest('#reiniciar')) { if (confirm('Reiniciar tudo? Isso apaga o estado salvo e volta para a tela de upload.\n(Suas configurações de trabalho salvas são mantidas.)')) { localStorage.removeItem('compass_state'); S = novoEstado(); hidratarPresets(); salvar(); render(); } return; }
+    const tab = t.closest('[data-tab]'); if (tab) { S.abaAtiva = +tab.dataset.tab; salvar(); render(); return; }
+    const tc = t.closest('[data-toggle-card]'); if (tc) { tc.closest('.gcard').classList.toggle('open'); return; }
+    const ch = t.closest('[data-escolher]'); if (ch) return escolherGrade(ch.dataset.escolher);
+    const rr = t.closest('[data-rm-rasc]'); if (rr) return removerRascunho(rr.dataset.rmRasc);
+    // editor de grade
+    const emo = t.closest('[data-montar]'); if (emo) return abrirEditor(+emo.dataset.montar, null);
+    const eed = t.closest('[data-editar]'); if (eed) return editarGrade(eed.dataset.editar, +eed.dataset.sem);
+    const edt = t.closest('[data-ed-turma]'); if (edt) return editorPick(edt.dataset.edTurma, edt.dataset.turma);
+    const erm = t.closest('[data-ed-rm]'); if (erm) return editorRm(erm.dataset.edRm);
+    const esb = t.closest('[data-ed-subst]'); if (esb) return editorSubst(esb.dataset.edSubst);
+    const esu = t.closest('[data-ed-substituir]'); if (esu) return editorSubstituir(esu.dataset.edSubstituir, esu.dataset.novo);
+    const esv = t.closest('[data-ed-salvar]'); if (esv) return editorSalvar();
+    const elm = t.closest('[data-ed-limpar]'); if (elm) return editorLimpar();
+    const efc = t.closest('[data-ed-fechar]'); if (efc) return fecharEditor();
+    const dcu = t.closest('[data-del-custom]'); if (dcu) return delCustom(+dcu.dataset.sem, +dcu.dataset.delCustom);
+    const upd = t.closest('[data-upd-gnh]'); if (upd) return atualizarGNH(+upd.dataset.updGnh);
+    const dc = t.closest('[data-desconfirmar]'); if (dc) { delete S.escolhas[+dc.dataset.desconfirmar]; salvar(); render(); return; }
+    const ab = t.closest('[data-abrir-blocos]'); if (ab) { const el = document.getElementById('blocos-' + ab.dataset.abrirBlocos); if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } return; }
+
+    // manuais
+    const mn = t.closest('[data-manual]'); if (mn) return manualAction(mn);
+}
+
+function onInput(e) {
+    const r = e.target.closest('[data-range]');
+    if (r) {
+        const k = r.dataset.range; let v = +r.value; S.preferencias[k] = v;
+        if (k === 'cargaMin' && v > S.preferencias.cargaMax) S.preferencias.cargaMax = v;
+        if (k === 'cargaMax' && v < S.preferencias.cargaMin) S.preferencias.cargaMin = v;
+        $('#lbl-min').textContent = S.preferencias.cargaMin; $('#lbl-max').textContent = S.preferencias.cargaMax; salvar();
+    }
+}
+function onChange(e) {
+    const mnum = e.target.closest('[data-manualnum]');
+    if (mnum) { S.manuais[mnum.dataset.manualnum].h = +mnum.value || 0; salvar(); render(); return; }
+    const msem = e.target.closest('[data-manualsem]');
+    if (msem) { const k = msem.dataset.manualsem; if (k === 'enade') return; S.manuais[k].sem = +msem.value; salvar(); render(); return; }
+    const tr = e.target.closest('[data-trab]');
+    if (tr) {
+        const i = +tr.dataset.sem, k = tr.dataset.trab; S.trabalho[i] = K.normTrab(S.trabalho[i]);
+        const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
+        S.trabalho[i][k] = numericos[k] ? (+tr.value || 0) : tr.value; limparEscolhasApos(i); rerenderKeepOpen(); return;
+    }
+}
+
+/* ---------- Tooltip ---------- */
+let tipEl = null;
+function onTipMove(e) {
+    const el = e.target.closest('[data-tip]');
+    if (!el) { if (tipEl) { tipEl.remove(); tipEl = null; } return; }
+    if (!tipEl) { tipEl = document.createElement('div'); tipEl.className = 'tip'; document.body.appendChild(tipEl); }
+    tipEl.innerHTML = el.dataset.tip.replace(/\\n/g, '<br>').replace(/✓/g, '<span class="ok">✓</span>').replace(/⛔|⚠/g, '<span class="no">$&</span>');
+    let x = e.clientX + 14, y = e.clientY + 14;
+    const r = tipEl.getBoundingClientRect();
+    if (x + r.width > innerWidth) x = e.clientX - r.width - 14;
+    if (y + r.height > innerHeight) y = e.clientY - r.height - 14;
+    tipEl.style.left = x + 'px'; tipEl.style.top = y + 'px';
+}
+
+/* ---------- Ações ---------- */
+function rerenderKeepOpen() {
+    salvar();
+    if (S.fase === 'app') { const open = new Set($$('details.personalize[open]').map(e => e.id)); render(); open.forEach(id => { const e = document.getElementById(id); if (e) e.open = true; }); }
+    else render();
+}
+function blocoExiste(idx, d, p, s) { const a = manualBlocos(idx); return a.some(b => b.diaSemana === d && b.periodo === p && b.slot === s); }
+function addBloco(idx, d, p, s, nome) { S.bloqueios[idx] = S.bloqueios[idx] || []; if (!blocoExiste(idx, d, p, s)) S.bloqueios[idx].push({ diaSemana: d, periodo: p, slot: s, nome: nome || 'Bloqueio' }); }
+function rmBloco(idx, d, p, s) { const a = S.bloqueios[idx]; if (!a) return; const i = a.findIndex(b => b.diaSemana === d && b.periodo === p && b.slot === s); if (i >= 0) a.splice(i, 1); if (a && !a.length) delete S.bloqueios[idx]; }
+
+/* ---- arrastar p/ bloquear (vertical, mesmo dia) ---- */
+let drag = null;
+function onDragStart(e) {
+    const slot = e.target.closest('.blockgrid .slot'); if (!slot) return;
+    e.preventDefault();
+    drag = { sem: +slot.dataset.sem, day: +slot.dataset.d, startOrd: +slot.dataset.ord, curOrd: +slot.dataset.ord };
+    pintarSelecao();
+}
+function onDragOver(e) {
+    if (!drag) return;
+    const slot = e.target.closest('.blockgrid .slot'); if (!slot) return;
+    if (+slot.dataset.d !== drag.day) return;          // só no mesmo dia (vertical)
+    drag.curOrd = +slot.dataset.ord;
+    pintarSelecao();
+}
+function pintarSelecao() {
+    $$('.blockgrid .slot.selecting').forEach(el => el.classList.remove('selecting'));
+    if (!drag) return;
+    const lo = Math.min(drag.startOrd, drag.curOrd), hi = Math.max(drag.startOrd, drag.curOrd);
+    $$(`.blockgrid .slot[data-d="${drag.day}"]`).forEach(el => { const o = +el.dataset.ord; if (o >= lo && o <= hi) el.classList.add('selecting'); });
+}
+function onDragEnd() {
+    if (!drag) return;
+    const dr = drag; drag = null;
+    $$('.blockgrid .slot.selecting').forEach(el => el.classList.remove('selecting'));
+    const lo = Math.min(dr.startOrd, dr.curOrd), hi = Math.max(dr.startOrd, dr.curOrd);
+    if (lo === hi) {                                        // clique simples = alternar
+        const [p, s] = ORDER[lo];
+        if (blocoExiste(dr.sem, dr.day, p, s)) rmBloco(dr.sem, dr.day, p, s);
+        else { const nome = prompt('Nome do bloqueio (ex.: Trabalho, Academia):', 'Bloqueio'); if (nome === null) return; addBloco(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
+    } else {                                            // arrasto = bloqueia o intervalo
+        const nome = prompt('Nome do bloqueio para os horários selecionados:', 'Bloqueio'); if (nome === null) return;
+        for (let o = lo; o <= hi; o++) { const [p, s] = ORDER[o]; addBloco(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
+    }
+    limparEscolhasApos(dr.sem);   // S2.1 — recalcula semestres seguintes
+    rerenderKeepOpen();
+}
+
+// S2.1 — ao mudar algo num semestre, limpa as escolhas dos semestres POSTERIORES
+// (a oferta/pré-req mudam) para que sejam recalculadas automaticamente, sem "Refazer" manual.
+function limparEscolhasApos(idx) { let n = 0; for (const k in S.escolhas) if (+k > idx) { delete S.escolhas[k]; n++; } return n; }
+function escolherGrade(i) {
+    const sem = D.projecao[S.abaAtiva];
+    let g;
+    if (String(i).startsWith('p')) g = sem.personalizadas[+i.slice(1)];
+    else g = sem.grades[+i];
+    if (!g) return;
+    S.escolhas[sem.idx] = { codigos: g.sel.map(s => s.disciplina.codigo), turmas: Object.fromEntries(g.sel.map(s => [s.disciplina.codigo, s.turma ? s.turma.turma : null])), score: g.score, custom: g.custom };
+    limparEscolhasApos(sem.idx);
+    salvar(); toast('Grade confirmada para ' + sem.rotulo + ' · semestres seguintes recalculados'); render();
+}
+function removerRascunho(cod) {
+    const sem = D.projecao[S.abaAtiva];
+    const e = S.escolhas[sem.idx]; if (!e) return;
+    e.codigos = e.codigos.filter(c => c !== cod); delete e.turmas[cod];
+    salvar(); render();
+}
+// ---------- Ações do editor de grade ----------
+function abrirEditor(semIdx, base) {
+    S.editor = { idx: semIdx, codigos: base ? base.codigos.slice() : [], turmas: base ? { ...base.turmas } : {}, subst: null, base: !!base };
+    salvar(); render();
+    setTimeout(() => { const el = document.getElementById('editor-' + semIdx); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 30);
+}
+function editarGrade(i, semIdx) {
+    const sem = D.projecao.find(s => s.idx === semIdx); if (!sem) return;
+    const g = String(i).startsWith('p') ? (sem.personalizadas || [])[+String(i).slice(1)] : sem.grades[+i];
+    if (!g) return;
+    abrirEditor(semIdx, { codigos: g.sel.map(s => s.disciplina.codigo), turmas: Object.fromEntries(g.sel.map(s => [s.disciplina.codigo, s.turma ? s.turma.turma : null])) });
+}
+function editorPick(cod, turma) { const ed = S.editor; if (!ed) return; if (!ed.codigos.includes(cod)) ed.codigos.push(cod); ed.turmas[cod] = turma; salvar(); render(); }
+function editorRm(cod) { const ed = S.editor; if (!ed) return; ed.codigos = ed.codigos.filter(c => c !== cod); delete ed.turmas[cod]; if (ed.subst === cod) ed.subst = null; salvar(); render(); }
+function editorSubst(cod) { const ed = S.editor; if (!ed) return; ed.subst = ed.subst === cod ? null : cod; render(); }
+function editorSubstituir(cod, novo) {
+    const ed = S.editor; if (!ed) return; const i = ed.codigos.indexOf(cod); if (i < 0) return;
+    const sem = D.projecao.find(s => s.idx === ed.idx); const t = turmasDe(novo, sem)[0];
+    ed.codigos[i] = novo; delete ed.turmas[cod]; ed.turmas[novo] = t ? t.turma : null; ed.subst = null; salvar(); render();
+}
+function editorSalvar() {
+    const ed = S.editor; if (!ed || !ed.codigos.length) return;
+    S.custom[ed.idx] = S.custom[ed.idx] || [];
+    S.custom[ed.idx].push({ codigos: ed.codigos.slice(), turmas: { ...ed.turmas }, score: 0, custom: true });
+    S.editor = null; salvar(); toast('Grade personalizada salva.'); render();
+}
+function editorLimpar() { const ed = S.editor; if (!ed) return; ed.codigos = []; ed.turmas = {}; ed.subst = null; salvar(); render(); }
+function fecharEditor() { S.editor = null; salvar(); render(); }
+function delCustom(semIdx, i) { if (S.custom[semIdx]) { S.custom[semIdx].splice(i, 1); if (!S.custom[semIdx].length) delete S.custom[semIdx]; } salvar(); render(); }
+function manualAction(btn) {
+    const a = btn.dataset.manual, cod = btn.dataset.cod, m = S.manuais;
+    if (a === 'estagio-do') { const selEl = $(`.manual-sel[data-cod="${cod}"]`); m.estagios[cod] = selEl ? +selEl.value : 1; }
+    if (a === 'estagio-undo') { delete m.estagios[cod]; }
+    if (a === 'enade-do') { const sel = $('[data-manualsem="enade"]'); m.enade = { done: true, sem: sel ? +sel.value : 0 }; }
+    if (a === 'enade-undo') { m.enade = { done: false, sem: null }; }
+    salvar(); render();
+}
+/* ---------- Turmas Abertas (Portal do Aluno) ---------- */
+async function lerTurmas(file) {
+    const pages = await extrairPaginas(file); return K.parseTurmasAbertas(pages);
+}
+function atualizarGNH(semIdx) {
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+    inp.onchange = async () => {
+        if (!inp.files[0]) return; toast('Lendo Turmas Abertas…');
+        try { const g = await lerTurmas(inp.files[0]); if (!g.length) throw new Error('vazio'); S.parsed.gnh = g; salvar(); toast('Turmas Abertas atualizada com ' + g.length + ' turmas.'); render(); }
+        catch (err) { toast('Falha ao ler o PDF de Turmas Abertas.'); console.error(err); }
+    };
+    inp.click();
+}
+
+/* ---------- Processamento dos uploads ---------- */
+async function processar() {
+    const st = $('#proc-status'); const setp = (m) => { if (st) st.textContent = m; };
+    try {
+        setp('Lendo Matriz Curricular…');
+        const mp = await extrairPaginas(S.files.matriz);
+        const matriz = K.parseMatriz(mp);
+        if (!matriz.disciplinas.length) throw new Error('matriz');
+        setp('Lendo Histórico Escolar…');
+        const hp = await extrairPaginas(S.files.historico);
+        const historico = K.parseHistorico(hp);
+        if (!historico.aluno.matricula) throw new Error('historico');
+        setp('Lendo Turmas Abertas…');
+        let gnh; try { gnh = await lerTurmas(S.files.gnh); } catch (e) { throw new Error('gnh'); }
+        if (!gnh.length) throw new Error('gnh');
+
+        S.parsed = { matriz, historico, gnh };
+        const eqd = K.detectarEquivalencias(matriz, gnh);
+        S.equivalencias = { ...eqd.auto };
+        S.divergPendentes = eqd.divergencias;
+        S.divergTotal = eqd.divergencias.length;
+        if (!S.preferencias.preferenciaTrilhas.length) S.preferencias.preferenciaTrilhas = Object.keys(K.TRILHA_SUBAREAS);
+        setp('Pronto!');
+        S.fase = eqd.divergencias.length ? 'divergencias' : 'preferencias';
+        salvar(); render();
+    } catch (err) {
+        const nome = err.message === 'matriz' ? 'Matriz Curricular' : err.message === 'historico' ? 'Histórico Escolar' : err.message === 'gnh' ? 'Turmas Abertas' : '';
+        setp('');
+        alert(nome ? `Não foi possível extrair dados de [${nome}]. Verifique se o PDF tem texto selecionável (não é imagem escaneada).` : 'Erro ao processar os arquivos: ' + err.message);
+        console.error(err);
+    }
+}
+
+function toast(msg) { const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2600); }
+
+/* ---------- Upload handlers (file inputs) ---------- */
+document.addEventListener('change', e => {
+    const inp = e.target.closest('[data-input]'); if (!inp) return;
+    const k = inp.dataset.input; const file = inp.files[0]; if (!file) return;
+    if (!/pdf/i.test(file.type) && !/\.pdf$/i.test(file.name)) { alert('Selecione um arquivo PDF.'); return; }
+    S.files[k] = file; renderUpload();
+});
+document.addEventListener('dragover', e => { const dz = e.target.closest('.dz'); if (dz) { e.preventDefault(); dz.classList.add('drag'); } });
+document.addEventListener('dragleave', e => { const dz = e.target.closest('.dz'); if (dz) dz.classList.remove('drag'); });
+document.addEventListener('drop', e => {
+    const dz = e.target.closest('.dz'); if (!dz) return; e.preventDefault(); dz.classList.remove('drag');
+    const k = dz.dataset.dz; const file = e.dataTransfer.files[0]; if (!file) return;
+    if (!/pdf/i.test(file.type) && !/\.pdf$/i.test(file.name)) { alert('Solte um arquivo PDF.'); return; }
+    S.files[k] = file; renderUpload();
+});
+
+/* ---------- Bootstrap ---------- */
+(function init() {
+    const saved = carregar();
+    if (saved && saved.parsed && saved.parsed.matriz && saved.fase === 'app') { S = saved; }
+    else if (saved && saved.parsed && saved.parsed.matriz) { S = saved; }
+    else S = novoEstado();
+    hidratarPresets();                                   // configs de trabalho salvas (chave dedicada)
+    // se restaurou em fase app, ok; senão começa upload
+    if (!S.parsed || !S.parsed.matriz) S.fase = 'upload';
+    render();
+})();
