@@ -655,7 +655,10 @@
     /* Geração de grades por backtracking com prazo (3.4.2-4) */
     function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, trabConfig) {
         const min = pref.cargaMin, max = pref.cargaMax;
-        const pool = candOrdenadas.slice(0, 14);             // limita explosão
+        // Pool de busca (mantém a ordem de prioridade): top-18 optativas + TODAS as obrigatórias
+        // disponíveis, mesmo as de período futuro que a prioridade rebaixa (cada obrigatória pesa muito
+        // no score). Antes truncávamos em 14 por prioridade e perdíamos obrigatórias mal ranqueadas.
+        const pool = candOrdenadas.filter((c, i) => i < 18 || !c.disciplina.isOpcional);
         const grades = []; let nodes = 0;
         const trab = trabConfig && trabConfig.trabalha && (+trabConfig.horas > 0) ? trabConfig : null;
 
