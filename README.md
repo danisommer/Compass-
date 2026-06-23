@@ -7,15 +7,11 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
 ## Como usar
 1. Abra `index.html` em um navegador moderno (Chrome, Firefox, Edge). Precisa de internet
    apenas para carregar as bibliotecas via CDN (PDF.js, Sortable.js, Google Fonts).
-2. Envie a **Matriz Curricular** (`Grade.pdf`) e o **Histórico Escolar** (`Histórico.pdf`).
-   Para a **Grade na Hora**, há duas opções:
-   - **Importação automática (recomendado)**: na zona "Grade na Hora", informe o semestre
-     (ex.: `2026-1`) e clique em **Abrir JSON ↗** — isso abre a oferta oficial do site
-     *Grade na Hora* (SI · Curitiba). Salve o `.json` e solte/selecione na mesma zona.
-   - **PDF**: o `Grade_na_Hora_BSI_*.pdf` exportado do site também continua funcionando.
-   > O JSON é a oferta **pública** do curso (sem login/dados pessoais). Como o site não
-   > envia cabeçalhos CORS, o navegador não consegue baixá-lo direto — por isso o fluxo é
-   > "abrir → salvar → soltar". Seus PDFs pessoais continuam 100% locais.
+2. Envie os três PDFs do **Portal do Aluno**:
+   - **Matriz Curricular** (`Grade.pdf`)
+   - **Histórico Escolar** (`Histórico.pdf`)
+   - **Turmas Abertas** (`TurmasAbertas.pdf`) — tela "Turmas Abertas" do Portal, com horários,
+     vagas e **prioridade de curso**. (O botão "❓ Como exportar os PDFs" mostra o passo a passo.)
 3. Confirme eventuais **divergências de código** (ex.: `IF69D` × `ICSV30`).
 4. Ajuste as **preferências** (campus, turnos, faixa de carga, ordem de trilhas).
 5. Navegue pelas abas de semestre, escolha/edite grades e marque conclusões manuais.
@@ -23,16 +19,17 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
 ## O que o app faz
 - **Parsing geométrico dos PDFs** (reconstrução de linhas por coordenadas, idêntica ao
   PDF.js do navegador) → matriz, histórico e turmas abertas.
-- **Importação da Grade na Hora via JSON oficial** (`gradenahora.com.br`): a oferta de turmas
-  é lida do arquivo estático do site (campus 01/Curitiba, curso 236/SI) e convertida para a
-  mesma estrutura do parser de PDF — dados mais limpos e completos (turmas, salas, professores,
-  Ecoville/Neoville via `*`/`**`, EaD).
+- **Leitura das Turmas Abertas (PDF do Portal)**: parser geométrico por coluna (Turma,
+  Enquadramento, Vagas, Reserva, **Prioridade de curso**, Horário, Professor, Equivalências) →
+  turmas com salas, Ecoville/Neoville (`*`/`**`), EaD e a **prioridade do curso (SI)** em cada
+  turma. As vagas são desconsideradas (o foco é a ordem de prioridade entre cursos).
 - **Grafo de pré-requisitos** + motor que gera as **5 melhores grades** por semestre,
   sem conflito de horário, respeitando campus/turno/bloqueios (busca com prazo de 2 s).
   A priorização favorece obrigatórias faltantes/atrasadas e, como critério secundário,
   matérias **mais fundacionais** — que destravam mais (imediato) e têm mais **dependentes
-  transitivos** (fecho de descendentes ainda não cursados), uma aposta mais robusta contra
-  variações na oferta futura.
+  transitivos** (fecho de descendentes ainda não cursados). Na escolha de **turma**, prefere
+  aquelas em que o aluno (SI) tem **melhor prioridade** e descarta as Fechadas em que ele não
+  pode se matricular.
 - **Projeção até a formatura** com recálculo em tempo real a cada escolha.
 - **Painel de horas faltantes** por área (obrigatórias, Segundo Estrato [1159],
   Humanidades [1161], Trilhas [1160] com validação parcial de 3 subáreas, eletivas,
@@ -45,7 +42,19 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
   **acender a cadeia de pré-requisitos** (o que vem antes) e o que ela **libera** (o que vem
   depois), com um painel de detalhes (CH, pré-reqs, semestre planejado). Arraste o fundo para
   mover, role para zoom e use "Ajustar" para reenquadrar.
-- **Personalização** de grade e **persistência** em `localStorage`.
+- **Editor de grade** integrado às sugestões: o card **“➕ Montar grade”** fica junto das 5
+  sugestões e cada grade (recomendada ou personalizada) tem **“✏️ Editar”**. No editor você
+  adiciona/remove matérias por **turma** (todas as turmas aparecem; as em conflito ficam
+  riscadas com o motivo no tooltip), vê o **score recalculado ao vivo**, troca uma matéria
+  indisponível por outra (no próximo semestre) e **salva como nova grade personalizada** sem
+  alterar a original. Grades personalizadas têm score automático e **persistem** (o “Limpar” só
+  zera o rascunho do editor).
+- **Recálculo automático**: ao confirmar/alterar a grade de um semestre — ou mudar trabalho/
+  bloqueios — as **escolhas dos semestres seguintes são limpas e recalculadas** automaticamente
+  (sem precisar de “Refazer” em cada um).
+- **Ajuda “Como exportar os PDFs”**: um slide-over com tutorial ilustrado (4 capturas de tela)
+  de como salvar Turmas Abertas, Histórico e Matriz no Portal do Aluno.
+- **Persistência** completa em `localStorage`.
 
 ## Requisitos atendidos além do spec base
 - **Horários travados por semestre** (não globais) — editáveis na aba de cada semestre.
