@@ -20,6 +20,10 @@ três PDFs do Portal do Aluno. **Tudo roda no navegador** — nenhum dado sai da
   PDF.js do navegador) → matriz, histórico e turmas abertas.
 - **Grafo de pré-requisitos** + motor que gera as **5 melhores grades** por semestre,
   sem conflito de horário, respeitando campus/turno/bloqueios (busca com prazo de 2 s).
+  A priorização favorece obrigatórias faltantes/atrasadas e, como critério secundário,
+  matérias **mais fundacionais** — que destravam mais (imediato) e têm mais **dependentes
+  transitivos** (fecho de descendentes ainda não cursados), uma aposta mais robusta contra
+  variações na oferta futura.
 - **Projeção até a formatura** com recálculo em tempo real a cada escolha.
 - **Painel de horas faltantes** por área (obrigatórias, Segundo Estrato [1159],
   Humanidades [1161], Trilhas [1160] com validação parcial de 3 subáreas, eletivas,

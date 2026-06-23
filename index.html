@@ -832,6 +832,19 @@ function getDesbloqueaveis(grafo, codigo, cursadas) {
   v.out.forEach(nx => { const w = grafo.get(nx); let ok = true; w.in.forEach(p => { if (!futuras.has(p)) ok = false; }); if (ok && !cursadas.has(nx)) out.push(nx); });
   return out;
 }
+// fecho transitivo de descendentes: todas as matérias que dependem (direta/indiretamente) de cada código.
+// Memoizado; assume grafo acíclico (com guarda contra ciclos por garantia).
+function descendentesTransitivos(grafo){
+  const memo = new Map();
+  const dfs = (cod, pilha) => {
+    if (memo.has(cod)) return memo.get(cod);
+    const acc = new Set(); const v = grafo.get(cod);
+    if (v) v.out.forEach(nx => { if (pilha.has(nx)) return; acc.add(nx); pilha.add(nx); dfs(nx, pilha).forEach(x => acc.add(x)); pilha.delete(nx); });
+    memo.set(cod, acc); return acc;
+  };
+  grafo.forEach((_, cod) => { if (!memo.has(cod)) dfs(cod, new Set([cod])); });
+  return memo;
+}
 
 function conflita(hA, hB) {
   for (const a of hA) for (const b of hB) if (a.diaSemana===b.diaSemana && a.periodo===b.periodo && a.slot===b.slot) return true;
@@ -870,16 +883,19 @@ function candidatasSemestre(ctx, cursadas, emAndamento, usarGNH) {
 /* Prioridade (3.4.1) */
 function prioridade(ctx, cand, cursadas, faltantesObrig) {
   const { grafo, pref } = ctx;
+  if (!ctx._descMemo) ctx._descMemo = descendentesTransitivos(grafo);
   return cand.map(c => {
     const d = c.disciplina;
-    const fanout = getDesbloqueaveis(grafo, d.codigo, cursadas).length;
+    const fanout = getDesbloqueaveis(grafo, d.codigo, cursadas).length;     // destrava agora (1 nível)
+    const descSet = ctx._descMemo.get(d.codigo);
+    let alcance = 0; if (descSet) descSet.forEach(x => { if (!cursadas.has(x)) alcance++; });  // dependentes futuros ainda não cursados
     const obrig = !d.isOpcional;
     const isFaltObrig = obrig && faltantesObrig.has(d.codigo);
     const trilhaRank = (d.subAreaTrilha && pref.preferenciaTrilhas.indexOf(d.subAreaTrilha) >= 0)
       ? (pref.preferenciaTrilhas.length - pref.preferenciaTrilhas.indexOf(d.subAreaTrilha)) : 0;
     const atraso = obrig ? (50 - d.periodoSugerido) : 0;
-    const key = (isFaltObrig?100000:0) + (obrig?10000:0) + atraso*100 + fanout*30 + trilhaRank*5;
-    return Object.assign({}, c, { fanout, obrig, isFaltObrig, trilhaRank, _key: key });
+    const key = (isFaltObrig?100000:0) + (obrig?10000:0) + atraso*100 + alcance*8 + fanout*30 + trilhaRank*5;
+    return Object.assign({}, c, { fanout, alcance, obrig, isFaltObrig, trilhaRank, _key: key });
   }).sort((a, b) => b._key - a._key);
 }
 
@@ -891,11 +907,11 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
   const trab = trabConfig && trabConfig.trabalha && (+trabConfig.horas>0) ? trabConfig : null;
 
   function score(sel) {
-    let nObr=0, fan=0, nTri=0, nBlk=0;
-    for (const s of sel) { if (s.obrig) nObr++; fan += s.fanout; if (s.trilhaRank>0) nTri++; if (s.bloqueado) nBlk++; }
+    let nObr=0, fan=0, alc=0, nTri=0, nBlk=0;
+    for (const s of sel) { if (s.obrig) nObr++; fan += s.fanout; alc += (s.alcance||0); if (s.trilhaRank>0) nTri++; if (s.bloqueado) nBlk++; }
     let penTrab = 0;
     if (trab){ const ct = custoTrab(trab, ocupacaoPorDia(sel)); penTrab = 12*ct.deficit + 40*ct.conflitosNucleo + 25*ct.rigidConf; }
-    return 100*nObr + 8*fan + 12*nTri - 40*nBlk - 6*sel.length - penTrab;
+    return 100*nObr + 8*fan + 2*alc + 12*nTri - 40*nBlk - 6*sel.length - penTrab;
   }
   function rec(idx, sel, ocup) {
     if (Date.now() > deadline) return;
@@ -983,7 +999,7 @@ function calcularHoras(matriz, cursadasSet, extras) {
 
 /* ---------- exports ---------- */
 const API = { norm, dice, reconstruirLinhas, parseMatriz, parseHistorico, parseGNH,
-  detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis,
+  detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos,
   candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado,
   TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase,
   ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
@@ -1213,7 +1229,7 @@ function reconstruirGrade(escolha, cursadas, blocos){
     const d = D.byCod.get(cod); if (!d) continue;
     const t = turmaDe(cod, (escolha.turmas||{})[cod]);
     const blk = t ? K.bloqueado(t.horarios, blocos) : false;
-    sel.push({ disciplina:d, turma:t, horarios:t?t.horarios:[], bloqueado:blk, fanout:0, trilhaRank:0, obrig:!d.isOpcional });
+    sel.push({ disciplina:d, turma:t, horarios:t?t.horarios:[], bloqueado:blk, fanout:0, alcance:0, trilhaRank:0, obrig:!d.isOpcional });
   }
   return { sel, score: escolha.score||0, custom: !!escolha.custom };
 }
