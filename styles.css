@@ -2099,3 +2099,82 @@ input[type=range]::-webkit-slider-thumb {
     border-radius: 8px;
     box-shadow: 0 0 0 4px rgba(79, 142, 247, .08)
 }
+
+/* ---- turma com conflito de trabalho permitido (horário flexível) — S4 ---- */
+.ed-turma.conflito-trab {
+    border-color: var(--secondary);
+    border-style: dashed;
+    color: var(--secondary)
+}
+
+.ed-turma.conflito-trab:hover {
+    border-color: var(--secondary)
+}
+
+/* ---- acréscimo de score por matéria (S6) ---- */
+.ed-delta {
+    font-family: 'JetBrains Mono';
+    font-size: 11px;
+    font-weight: 700;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    flex: none
+}
+
+.ed-delta.pos {
+    color: var(--success);
+    background: rgba(79, 209, 102, .12)
+}
+
+.ed-delta.neg {
+    color: var(--muted);
+    background: var(--surface3)
+}
+
+/* matéria que ocupa horário de trabalho (flexível) na grade — S4.1 */
+.disc-row.conflito-trab {
+    box-shadow: inset 2px 0 0 var(--secondary)
+}
+
+/* botão "ver no grafo" por matéria — S10 */
+.disc-grafo {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--surface3);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1;
+    flex: none
+}
+
+.disc-grafo:hover {
+    background: var(--primary);
+    color: #06122b
+}
+
+/* tooltip do score na barra superior — S8 */
+.score-help {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--surface2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 5px 9px;
+    cursor: help
+}
+
+.score-help:hover {
+    color: var(--text);
+    border-color: var(--primary)
+}
+
+.gcard .gh .score[data-tip],
+.editor .score[data-tip] {
+    cursor: help
+}

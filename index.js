@@ -455,6 +455,11 @@
         const reDisc = /^[A-Z]{2,5}[0-9][0-9A-Z]{0,2}$/, reTurma = /^[A-Z]{1,2}[0-9]{2,3}$/;
         const ALVO = norm('Sist De Informação');
         const turmas = []; let disc = null;
+        // O código da disciplina pode vir fragmentado em vários spans no PDF (ex.: "ICS" "X" "20"
+        // para "Trabalho de Integração"). Reconstrói o código juntando os tokens iniciais da 1ª
+        // coluna até casar reDisc; retorna {code, n} (n = nº de tokens consumidos).
+        const leadingCode = toks => { let s = ''; for (let q = 0; q < toks.length; q++) { const tk = toks[q]; if (tk.x < 100 && /^[A-Z0-9]+$/i.test(tk.t)) { s += tk.t; if (reDisc.test(s)) return { code: s, n: q + 1 }; } else break; } return null; };
+        const discsVistas = new Map();   // toda disciplina que aparece no PDF (mesmo sem turma parseável)
         for (const pg of pages) {
             const its = pg.items.filter(i => i.str && i.str.trim());
             const bands = [];
@@ -465,13 +470,16 @@
                 const b = bands[bi], joined = jb(bi), first = b.toks[0]; if (!first) continue;
                 // cabeçalho de disciplina. Código/nome/aulas saem da 1ª linha (aceita aulas fracionárias);
                 // o chExt ("horas semestrais") é opcional pois pode ficar na página seguinte (cabeçalho quebra a página).
-                if (first.x < 70 && reDisc.test(first.t) && /Aulas\s+semanais/i.test(joined + ' ' + jb(bi + 1))) {
-                    let full = joined, j = bi;
+                const lc = first.x < 70 ? leadingCode(b.toks) : null;
+                if (lc && /Aulas\s+semanais/i.test(joined + ' ' + jb(bi + 1))) {
+                    // prefixa o código já reconstruído para que o m2 case mesmo com código fragmentado
+                    let full = lc.code + ' ' + b.toks.slice(lc.n).map(t => t.t).join(' '), j = bi;
                     while (!/horas semestrais|extensionistas\)/i.test(full) && j + 1 < bands.length && j - bi < 4) { j++; full += ' ' + jb(j); }
                     const m2 = full.match(/^([A-Z]{2,5}[0-9][0-9A-Z]{0,2})\s*[-–]\s*(.+?)\s*\(([\d.,]+)\s*Aulas semanais presenciais/i);
                     if (m2) {
                         const extM = full.match(/([\d.,]+)\s*horas semestrais/i);
                         disc = { codigo: m2[1], nome: tituloCase(m2[2].replace(/\s+/g, ' ').trim()), aulas: Math.round(parseFloat(m2[3].replace(',', '.')) || 0), chExt: extM ? Math.round(parseFloat(extM[1].replace(',', '.')) || 0) : 0 };
+                        discsVistas.set(disc.codigo, disc);
                         bi = j; continue;
                     }
                 }
@@ -482,7 +490,7 @@
                     for (; k < bands.length; k++) {
                         const nb = bands[k], nf = nb.toks[0], nj = jb(k); if (!nf) continue;
                         const nT = nf.x < 76 && reTurma.test(nf.t) && nb.toks.some(t => t.x >= 76 && t.x < 160);
-                        const nD = nf.x < 70 && reDisc.test(nf.t) && /Aulas\s+semanais/i.test(nj + ' ' + jb(k + 1));
+                        const nD = nf.x < 70 && !!leadingCode(nb.toks) && /Aulas\s+semanais/i.test(nj + ' ' + jb(k + 1));
                         const nH = /^Turma\b/.test(nj) && /Enquadramento/.test(nj);
                         if (nT || nD || nH) break; blockBands.push(nb);
                     }
@@ -507,6 +515,13 @@
                 }
             }
         }
+        // Disciplinas que constam no PDF mas não tiveram nenhuma turma parseada (turma/horário ausentes)
+        // ainda devem poder ser listadas/usadas — Turmas Abertas é a fonte da verdade do que está disponível.
+        const comTurma = new Set(turmas.map(t => t.codigo));
+        discsVistas.forEach((dd, cod) => {
+            if (comTurma.has(cod)) return;
+            turmas.push({ codigo: cod, nome: dd.nome, turma: '—', professor: '', aulasSem: dd.aulas, chExt: dd.chExt || 0, horarios: [], campus: 'CURITIBA', enquadramento: '', reserva: '', prioridadeSI: null, prioridades: [], elegivel: true, optativaMatrizes: [], semOferta: true });
+        });
         return turmas;
     }
 
@@ -590,6 +605,7 @@
             let turmasViaveis = (gnhByCod.get(cod) || []);
             if (usarGNH) {
                 turmasViaveis = turmasViaveis.filter(t => {
+                    if (t.semOferta) return true;                 // consta na oferta sem turma/horário detalhado — não bloquear
                     if (pref.campusUnico && t.campus !== pref.campus) return false;
                     if (t.horarios.length && !t.horarios.every(h => pref.turnos.includes(h.periodo))) return false;
                     return true;
@@ -704,6 +720,36 @@
         return Math.round(100 * nObr + 8 * fan + 2 * alc + 12 * nTri - 40 * nBlk - 6 * (selRaw ? selRaw.length : 0) - penTrab);
     }
 
+    /* Detalhamento do score (mesma fórmula de pontuarSel) — para o tooltip "como o score foi obtido". */
+    function pontuarSelDetalhe(ctx, selRaw, cursadas, faltObrig, pref, bloqueios, trabConfig) {
+        if (!ctx._descMemo) ctx._descMemo = descendentesTransitivos(ctx.grafo);
+        let nObr = 0, fan = 0, alc = 0, nTri = 0, nBlk = 0;
+        for (const s of (selRaw || [])) {
+            const d = s.disciplina; if (!d) continue;
+            fan += getDesbloqueaveis(ctx.grafo, d.codigo, cursadas).length;
+            const desc = ctx._descMemo.get(d.codigo); if (desc) desc.forEach(x => { if (!cursadas.has(x)) alc++; });
+            if (!d.isOpcional) nObr++;
+            if (d.subAreaTrilha && pref.preferenciaTrilhas.indexOf(d.subAreaTrilha) >= 0) nTri++;
+            const blk = s.bloqueado != null ? s.bloqueado : bloqueado(s.horarios || [], bloqueios || []);
+            if (blk) nBlk++;
+        }
+        const len = selRaw ? selRaw.length : 0;
+        let deficit = 0, conflitosNucleo = 0, rigidConf = 0;
+        if (trabConfig && trabConfig.trabalha && +trabConfig.horas > 0) { const ct = custoTrab(trabConfig, ocupacaoPorDia(selRaw)); deficit = ct.deficit; conflitosNucleo = ct.conflitosNucleo; rigidConf = ct.rigidConf; }
+        const penTrab = 12 * deficit + 40 * conflitosNucleo + 25 * rigidConf;
+        const partes = [
+            { label: 'Obrigatórias', n: nObr, peso: 100, val: 100 * nObr },
+            { label: 'Destrava agora (fan-out)', n: fan, peso: 8, val: 8 * fan },
+            { label: 'Dependentes futuros (alcance)', n: alc, peso: 2, val: 2 * alc },
+            { label: 'Trilhas preferidas', n: nTri, peso: 12, val: 12 * nTri },
+            { label: 'Em conflito com bloqueio', n: nBlk, peso: -40, val: -40 * nBlk },
+            { label: 'Nº de disciplinas', n: len, peso: -6, val: -6 * len },
+            { label: 'Penalidade de trabalho', n: null, peso: null, val: -penTrab },
+        ];
+        const total = Math.round(100 * nObr + 8 * fan + 2 * alc + 12 * nTri - 40 * nBlk - 6 * len - penTrab);
+        return { nObr, fan, alc, nTri, nBlk, len, deficit, conflitosNucleo, rigidConf, penTrab, total, partes };
+    }
+
     /* ===================================================================
         Cálculo de horas faltantes (validado contra histórico oficial)
         =================================================================== */
@@ -757,7 +803,7 @@
     /* ---------- exports ---------- */
     const API = {
         norm, dice, reconstruirLinhas, parseMatriz, parseHistorico, parseTurmasAbertas,
-        detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos, pontuarSel,
+        detectarEquivalencias, construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos, pontuarSel, pontuarSelDetalhe,
         candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado,
         TRILHA_SUBAREAS, CONJUNTOS, REQUISITOS, SLOTS, DIAS, tituloCase,
         ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
@@ -778,6 +824,20 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const root = $('#root');
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// S8 — explicação geral do score (tooltip da barra superior e dos cabeçalhos de grade)
+const SCORE_TIP = esc('O que é o Score') + '\\nUma nota que ordena as grades possíveis de um semestre: quanto maior, melhor a grade para avançar no curso.\\n\\n' +
+    esc('Para que serve') + '\\nRecomendar e ordenar as grades, priorizando o que mais aproxima você da formatura e respeita seus bloqueios/trabalho.\\n\\n' +
+    esc('Como é calculado') + '\\n+100 por obrigatória · +8 por matéria que destrava agora · +2 por dependente futuro · +12 por trilha preferida · −40 por conflito com bloqueio · −6 por matéria (enxuga a carga) · − penalidade de trabalho (déficit / núcleo / horário fixo).';
+// constrói o tooltip detalhado (S9) a partir do detalhamento de pontuarSelDetalhe
+function scoreBreakdownTip(sem, sel) {
+    const det = K.pontuarSelDetalhe(D.ctx, sel || [], sem.cursadasAntes || new Set(), sem.faltObrig || new Set(), S.preferencias, sem.bloqueios || [], trabDoSem(sem.idx));
+    const linhas = det.partes.filter(p => p.val !== 0 || (p.n != null && p.n !== 0)).map(p => {
+        const v = Math.round(p.val); const sinal = v >= 0 ? '+' : '';
+        const calc = p.n != null && p.peso != null ? `${p.n}×${p.peso} = ` : '';
+        return `${esc(p.label)}: ${calc}${sinal}${v}`;
+    });
+    return esc('Como este score foi obtido') + '\\n' + linhas.join('\\n') + '\\n──────\\n' + esc('Total') + `: ${det.total}`;
+}
 
 /* ---------- Ajuda: como exportar os PDFs do Portal do Aluno (slide-over) ---------- */
 const AJUDA_IMGS = /*__AJUDA_IMGS__*/[{ "w": 360, "h": 103, "src": "data:image/png;base64,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", "alt": "Tela de Turmas Abertas com seta indicando os campos Campus, Curso e o botão Confirmar", "cap": "Figura 1 – Selecione seu Campus, seu Curso e pressione Confirmar." }, { "w": 172, "h": 143, "src": "data:image/png;base64,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", "alt": "Tela de Turmas Abertas com seta indicando os dois botões de imprimir", "cap": "Figura 2 – Clique em qualquer um dos dois botões de impressão. Salve como turmas_abertas.pdf." }, { "w": 510, "h": 78, "src": "data:image/png;base64,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", "alt": "Tela do Histórico Completo com seta indicando o botão de imprimir o Histórico Escolar", "cap": "Figura 3 – Clique no botão de impressão do Histórico Escolar. Salve como historico_completo.pdf." }, { "w": 245, "h": 84, "src": "data:image/png;base64,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", "alt": "Tela de Matrizes Curriculares com seta indicando o botão de imprimir a Matriz Curricular", "cap": "Figura 4 – Clique no botão de impressão da Matriz Curricular. Salve como matriz_curricular.pdf." }];   // [{w,h,src,alt,cap}] na ordem Fig1..Fig4
@@ -868,7 +928,7 @@ function novoEstado() {
     return {
         fase: 'upload', files: { matriz: null, historico: null, gnh: null }, parsed: { matriz: null, historico: null, gnh: null },
         equivalencias: {}, divergPendentes: [], preferencias: structuredClone(DEFAULT_PREF), bloqueios: {}, trabalho: {}, trabPresets: [],
-        escolhas: {}, custom: {}, editor: null, manuais: { estagios: {}, eletiva: { h: 0, sem: 0 }, extensao: { h: 0, sem: 0 }, enade: { done: false, sem: null } },
+        escolhas: {}, custom: {}, editor: null, manuais: { estagios: {}, eletiva: { porSem: {} }, extensao: { porSem: {} }, enade: { done: false, sem: null } },
         abaAtiva: 0, sidebarCollapsed: false
     };
 }
@@ -878,6 +938,11 @@ function carregar() {
         const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = [];
         for (const k in o.trabalho) { o.trabalho[k] = K.normTrab(o.trabalho[k]); }   // migra estados antigos (campos novos)
         o.trabPresets.forEach(p => { p.cfg = K.normTrab(p.cfg); });
+        // migra itens manuais acumulativos (eletiva/extensão) p/ o modelo por-semestre {porSem:{idx:horas}}
+        if (o.manuais) ['eletiva', 'extensao'].forEach(k => {
+            const it = o.manuais[k]; if (!it) { o.manuais[k] = { porSem: {} }; return; }
+            if (!it.porSem) { it.porSem = {}; if (+it.h > 0) it.porSem[it.sem == null ? 0 : it.sem] = +it.h; delete it.h; delete it.sem; }
+        });
         return o;
     } catch (e) { return null; }
 }
@@ -890,6 +955,9 @@ function hidratarPresets() { const dk = carregarPresets(); if (dk !== null) { S.
 const ORDER = K.ORDEM_SLOTS;                                // [[p,s], ...] ordem vertical
 function manualBlocos(idx) { return (S.bloqueios && S.bloqueios[idx]) || []; }
 function trabDoSem(idx) { return (S.trabalho && S.trabalho[idx]) || null; }
+// S2: o usuário já respondeu se trabalha (Sim/Não) neste semestre?
+function trabRespondido(idx) { const w = trabDoSem(idx); return !!w && (w.trabalha === true || w.trabalha === false); }
+function trabFlex(idx) { const w = trabDoSem(idx); return !!(w && w.trabalha && w.flexivel); }
 // blocos de trabalho (auto) calculados a partir de uma seleção de grade
 function trabCalc(idx, sel) { return K.blocosTrabalhoCalc(trabDoSem(idx), K.ocupacaoPorDia(sel || [])); }
 function totalBloqueios() { let n = 0; for (const i in (S.bloqueios || {})) n += S.bloqueios[i].length; return n; }
@@ -901,6 +969,20 @@ function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return T
 function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabDoSem(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
 function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
 function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
+// S3: replica a configuração de horários travados (trabalho + bloqueios manuais) de `idx`
+// para todos os semestres projetados seguintes.
+function aplicarTrabSeguintes(idx) {
+    const w = K.normTrab(trabDoSem(idx)); const cfg = trabCfgDe(w); const manuais = manualBlocos(idx);
+    let n = 0;
+    (D.projecao || []).forEach(s => {
+        if (s.idx <= idx) return;
+        S.trabalho[s.idx] = K.normTrab(Object.assign({}, cfg, { trabalha: w.trabalha }));
+        if (manuais.length) S.bloqueios[s.idx] = manuais.map(b => ({ ...b })); else delete S.bloqueios[s.idx];
+        n++;
+    });
+    limparEscolhasApos(idx);
+    return n;
+}
 
 /* ---------- Derivação (grafo, ctx) ---------- */
 function derive() {
@@ -950,13 +1032,13 @@ function manualNoSem(idx) {
     for (const cod in m.estagios) { if (m.estagios[cod] === idx) out.push(cod); }
     return out;
 }
+// soma as horas lançadas por-semestre de um item manual até (e incluindo) `idx`
+function somaManualAteSem(item, idx) { let s = 0; const p = (item && item.porSem) || {}; for (const k in p) if (+k <= idx) s += (+p[k] || 0); return s; }
 function extrasAteSem(idx) {
     const m = S.manuais;
-    const eSem = m.eletiva.sem == null ? 0 : m.eletiva.sem;     // null = conta desde o início
-    const xSem = m.extensao.sem == null ? 0 : m.extensao.sem;
     return {
-        eletivaManual: (m.eletiva.h > 0 && eSem <= idx) ? m.eletiva.h : 0,
-        extensaoManual: (m.extensao.h > 0 && xSem <= idx) ? m.extensao.h : 0,
+        eletivaManual: somaManualAteSem(m.eletiva, idx),
+        extensaoManual: somaManualAteSem(m.extensao, idx),
     };
 }
 function cursadasComManuais(baseSet, idx) {
@@ -1038,7 +1120,8 @@ function projetar() {
             idx, rotulo: rotuloSem(idx), status: confirmada ? 'confirmado' : 'futuro',
             grade: escolhida, grades, personalizadas: pers, escolhida: confirmada, horas, candidatas: ord,
             manuais: manuaisAqui, formatura, estourou: ger.estourou, inviavel: grades.length === 0,
-            bloqueios: manuais, trab: trabCalc(idx, escolhida.sel), cursadasAntes: curIdx, faltObrig
+            bloqueios: manuais, trab: trabCalc(idx, escolhida.sel), cursadasAntes: curIdx, faltObrig,
+            aguardandoTrab: !trabRespondido(idx)   // S2: só exibe cronograma/grades após responder se trabalha
         });
 
         if (formatura) break;
@@ -1208,32 +1291,46 @@ function blocosSemestreHTML(sem) {
     const w = K.normTrab(trabDoSem(sem.idx));
     const trab = sem.trab || {};
     const nMan = manualBlocos(sem.idx).length;
-    const nTrab = (trab.slots || []).length;
-    const total = nMan + nTrab;
     const J = K.janelaTrab(w);
     const dn = { 2: 'Seg', 3: 'Ter', 4: 'Qua', 5: 'Qui', 6: 'Sex' };
     const resumo = K.DIAS_UTEIS.map(d => {
         const iv = trab.intervalos && trab.intervalos[d];
         return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
     }).join(' · ');
-    const flexFields = w.flexivel ? `
-    <label>Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${sem.idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${sem.idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
-    <label>Disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${sem.idx}"> dia(s)/sem</label>
+    const folgaLabel = `<label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${sem.idx}"> min</label>`;
+    // S5.2 — campos conforme flexibilidade
+    const camposFlex = `
+    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
+    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${sem.idx}"> e no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${sem.idx}"></label>
+    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${sem.idx}"> e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${sem.idx}"></label>
+    ${folgaLabel}
+    <label style="flex-basis:100%">Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${sem.idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${sem.idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
     <div style="flex-basis:100%;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
     <span class="muted">Dias que prefere flexibilizar:</span>
     ${K.DIAS_UTEIS.map(d => `<span class="daychip ${w.diasPreferidos.includes(d) ? 'on' : ''}" data-trab-dia="${d}" data-sem="${sem.idx}">${dn[d]}</span>`).join('')}
-    </div>` : '';
+    <span class="muted" style="margin-left:6px">— disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${sem.idx}"> dia(s)/sem</span>
+    </div>`;
+    const camposRigido = `
+    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
+    <label>Começar às <input type="time" value="${w.maxComeco}" data-trab="comeco" data-sem="${sem.idx}"></label>
+    <label>Terminar às <input type="time" value="${w.minFim}" data-trab="termino" data-sem="${sem.idx}"></label>
+    ${folgaLabel}`;
     const presets = S.trabPresets || [];
     const presetsRow = `
     <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:2px">
     <span class="muted">📁 Configurações salvas:</span>
     ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${sem.idx}" data-tip="Clique para aplicar “${esc(p.nome)}” a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma ainda</span>'}
     <button class="btn btn-sm btn-ghost" data-trab-preset-save="${sem.idx}">💾 Salvar atual…</button>
+    <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${sem.idx}" data-tip="Copia este trabalho e os bloqueios manuais para todos os semestres seguintes">📋 Aplicar p/ semestres seguintes</button>
     </div>`;
-    const respondido = w.trabalha !== null && w.trabalha !== undefined;   // S4: respondeu Sim/Não?
-    const indicativo = respondido
-        ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
-        : `<span class="chip" style="color:var(--secondary)">responda →</span>`;
+    const respondido = w.trabalha !== null && w.trabalha !== undefined;   // S5.3: respondeu Sim/Não?
+    // S5.3 — total de horas fechado (✓ verde) × não fechado (✗ vermelho)
+    const fechado = !w.trabalha || (trab.deficit <= 1e-6 && !trab.conflitosNucleo && !trab.rigidConf);
+    const indicativo = !respondido
+        ? `<span class="chip" style="color:var(--secondary)">responda →</span>`
+        : fechado
+            ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
+            : `<span class="chip" style="color:var(--error)">✗ preenchido (inválido)</span>`;
     return `<details class="personalize" id="blocos-${sem.idx}" ${!respondido ? 'open' : ''} style="margin-top:14px">
 <summary>🔒 Horários travados de ${esc(sem.rotulo)} ${indicativo} <span class="muted" style="font-weight:400;font-size:12px">— ${nMan} manual${nMan === 1 ? '' : 'is'}${w.trabalha ? ` + trabalho` : ''}</span></summary>
 <div class="work-form">
@@ -1243,17 +1340,14 @@ function blocosSemestreHTML(sem) {
         <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${sem.idx}">Não</button>
     </span></label>
     ${w.trabalha ? `
-    ${presetsRow}
-    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
-    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${sem.idx}"></label>
-    <label>no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${sem.idx}"></label>
-    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${sem.idx}"></label>
-    <label>e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${sem.idx}"></label>
-    <label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${sem.idx}"> min</label>
     <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🔁 Seus horários são flexíveis?</span>
-    <span class="toggle ${w.flexivel ? 'on' : ''}" data-trab-flex="${sem.idx}" style="width:38px;height:22px"><i></i></span>
-    <span class="muted">núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})</span></label>
-    ${flexFields}
+    <span class="segbtn">
+        <button class="seg ${w.flexivel ? 'on' : ''}" data-trab-flex-sim="${sem.idx}">Sim</button>
+        <button class="seg ${!w.flexivel ? 'on' : ''}" data-trab-flex-nao="${sem.idx}">Não</button>
+    </span>
+    <span class="muted">${w.flexivel ? `núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})` : 'horário fixo'}</span></label>
+    ${presetsRow}
+    ${w.flexivel ? camposFlex : camposRigido}
     <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${w.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>` : ''}</div>
     `: ''}
 </div>
@@ -1277,8 +1371,17 @@ function initTrilhasDrag() {
     Grafo de matérias (obrigatórias + trilhas) — force-directed em SVG
     =================================================================== */
 let GRAFO = null;
+let _grafoFocus = null;   // S10 — matéria a ser focada/selecionada ao abrir o grafo
 const ROT_STATUS = { concluida: 'Concluída', cursando: 'Cursando agora', disponivel: 'Disponível', bloqueada: 'Bloqueada (faltam pré-req)' };
 const NODE_HALF = 30;
+// S10 — centraliza a câmera do grafo num nó
+function grafoCentrarNo(cod) {
+    const nd = GRAFO && GRAFO.byCod.get(cod); const svg = document.getElementById('grafo-svg');
+    if (!nd || !svg) return false;
+    const r = svg.getBoundingClientRect(); const k = Math.max(GRAFO.view.k, 1);
+    GRAFO.view.k = k; GRAFO.view.x = r.width / 2 - nd.x * k; GRAFO.view.y = r.height / 2 - nd.y * k; grafoApplyView();
+    return true;
+}
 
 function grafoDados() {
     const incl = d => !d.isOpcional || d.conjuntoOptativo === '1160';     // obrigatórias + trilhas
@@ -1308,17 +1411,24 @@ function grafoDados() {
     return { nodes, edges, byCod: new Map(nodes.map(n => [n.cod, n])), sel: null, view: { x: 0, y: 0, k: 1 } };
 }
 
-// Fruchterman–Reingold: posições estáveis precomputadas (semeadas por período)
+// Fruchterman–Reingold: posições estáveis precomputadas (semeadas por período).
+// Nós sem arestas NÃO participam da simulação (senão formam um anel na periferia);
+// depois são posicionados junto a nós conectados da sua própria categoria (ver placeIsolated).
 function layoutForca(g, W, H, iters) {
     const n = g.nodes.length; if (!n) return;
     const k = Math.sqrt((W * H) / n) * 0.8;
     g.nodes.forEach((nd, i) => { const p = nd.per > 0 ? nd.per : 4; nd.x = (p / 9) * W + (Math.random() * 80 - 40); nd.y = (H * 0.08) + (i * 131 % Math.max(1, H - 100)) + (Math.random() * 40 - 20); });
     const adj = g.edges.map(e => [g.byCod.get(e.from), g.byCod.get(e.to)]).filter(a => a[0] && a[1]);
+    const deg = new Map(g.nodes.map(nd => [nd.cod, 0]));
+    for (const [a, b] of adj) { deg.set(a.cod, (deg.get(a.cod) || 0) + 1); deg.set(b.cod, (deg.get(b.cod) || 0) + 1); }
+    g.nodes.forEach(nd => nd._iso = (deg.get(nd.cod) || 0) === 0);
+    const sim = g.nodes.filter(nd => !nd._iso);   // só os conectados na simulação de forças
+    const ns = sim.length;
     let t = W * 0.10;
     for (let it = 0; it < iters; it++) {
-        g.nodes.forEach(v => { v.dx = 0; v.dy = 0; });
-        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-            const a = g.nodes[i], b = g.nodes[j];
+        sim.forEach(v => { v.dx = 0; v.dy = 0; });
+        for (let i = 0; i < ns; i++) for (let j = i + 1; j < ns; j++) {
+            const a = sim[i], b = sim[j];
             let dx = a.x - b.x, dy = a.y - b.y, dist = Math.hypot(dx, dy) || 0.01; const f = k * k / dist, ux = dx / dist, uy = dy / dist;
             a.dx += ux * f; a.dy += uy * f; b.dx -= ux * f; b.dy -= uy * f;
         }
@@ -1326,11 +1436,40 @@ function layoutForca(g, W, H, iters) {
             let dx = a.x - b.x, dy = a.y - b.y, dist = Math.hypot(dx, dy) || 0.01; const f = dist * dist / k, ux = dx / dist, uy = dy / dist;
             a.dx -= ux * f; a.dy -= uy * f; b.dx += ux * f; b.dy += uy * f;
         }
-        g.nodes.forEach(v => {
+        sim.forEach(v => {
             v.dx += (W / 2 - v.x) * 0.012; v.dy += (H / 2 - v.y) * 0.012;
             let d = Math.hypot(v.dx, v.dy) || 0.01, m = Math.min(d, t); v.x += v.dx / d * m; v.y += v.dy / d * m;
         });
         t *= 0.965;
+    }
+    placeIsolated(g, k);
+}
+
+// Posiciona cada nó isolado ao lado de um nó conectado da MESMA categoria (cor),
+// distribuído entre os nós da categoria e em leque para fora do centro do grafo.
+function placeIsolated(g, k) {
+    const con = g.nodes.filter(n => !n._iso), iso = g.nodes.filter(n => n._iso);
+    if (!iso.length) return;
+    const ref = con.length ? con : g.nodes;
+    const gx = ref.reduce((a, n) => a + n.x, 0) / ref.length, gy = ref.reduce((a, n) => a + n.y, 0) / ref.length;
+    const byTipo = {}; iso.forEach(n => (byTipo[n.tipo] || (byTipo[n.tipo] = [])).push(n));
+    for (const tipo in byTipo) {
+        const group = byTipo[tipo];
+        let hosts = con.filter(n => n.tipo === tipo);          // âncoras conectadas da mesma categoria
+        if (!hosts.length) hosts = con.slice();                 // categoria sem conectados → usa o grafo
+        if (!hosts.length) hosts = [{ x: gx, y: gy }];          // grafo vazio → usa o centro
+        const buckets = new Map(hosts.map(h => [h, []]));
+        group.forEach((nd, i) => buckets.get(hosts[i % hosts.length]).push(nd));
+        buckets.forEach((list, h) => {
+            const m = list.length; if (!m) return;
+            let rx = h.x - gx, ry = h.y - gy, rl = Math.hypot(rx, ry) || 1;  // direção radial p/ fora
+            const base = Math.atan2(ry / rl, rx / rl);
+            list.forEach((nd, j) => {
+                const ang = base + (m === 1 ? 0 : (j - (m - 1) / 2) * 0.7);
+                const rad = k * (0.95 + 0.5 * Math.floor(j / 8));            // anéis extras se muitos no mesmo host
+                nd.x = h.x + Math.cos(ang) * rad; nd.y = h.y + Math.sin(ang) * rad;
+            });
+        });
     }
 }
 
@@ -1469,6 +1608,14 @@ function renderGrafo() {
 </div>`;
     wireGrafo();
     requestAnimationFrame(grafoFit);
+    // S10 — se veio de "ver no grafo", seleciona e centraliza no nó
+    if (_grafoFocus) {
+        const cod = _grafoFocus; _grafoFocus = null;
+        requestAnimationFrame(() => {
+            if (GRAFO && GRAFO.byCod.has(cod)) { selecionarNoGrafo(cod); grafoCentrarNo(cod); }
+            else toast('Esta matéria não aparece no grafo (só obrigatórias e trilhas são exibidas).');
+        });
+    }
 }
 
 /* ===================================================================
@@ -1485,6 +1632,7 @@ function renderApp() {
 <button class="btn btn-sm btn-ghost" id="toggle-side">☰</button>
 <div class="logo">C+</div><div class="who">${esc(al.nome || 'Aluno')}</div>
 <div class="meta">
+    <span class="score-help" data-tip="${SCORE_TIP}">ⓘ Score</span>
     <div class="stat"><b>${(al.coeficienteAbsoluto || 0).toFixed(4)}</b><span>Coef. absoluto</span></div>
     <div class="stat"><b>${proj.length - 1}</b><span>Semestres projetados</span></div>
     <div class="stat"><b>${D.hist.aluno.periodoAtual}º</b><span>Período atual</span></div>
@@ -1531,7 +1679,7 @@ function sidebarHTML(sem) {
 </div>
 <div class="side-sec">
 <h4>🧩 Itens não presenciais / manuais</h4>
-${manuaisHTML()}
+${manuaisHTML(sem)}
 </div>
 <div class="side-sec">
 <h4>⚙️ Preferências</h4>
@@ -1540,38 +1688,61 @@ ${manuaisHTML()}
 </div>`;
 }
 
-function manuaisHTML() {
+// idx do primeiro semestre projetado em que o requisito de horas `key` é integralizado (ou null)
+function semIdxItemSatisfeito(key) { const s = (D.projecao || []).find(s => s.horas && s.horas[key] && s.horas[key].faltante === 0); return s ? s.idx : null; }
+function manuaisHTML(sem) {
     const m = S.manuais;
-    const opts = D.projecao.map(s => `<option value="${s.idx}">${s.rotulo}</option>`).join('');
-    const optsSel = sel => D.projecao.map(s => `<option value="${s.idx}" ${(+sel === s.idx) ? 'selected' : ''}>${s.rotulo}</option>`).join('');
+    const idx = sem ? sem.idx : 0;   // conclusão por clique usa o semestre em exibição (sem dropdown)
+    // S11 — itens concluíveis por clique: a trava opaca "Item satisfeito em [período]" só aparece
+    // A PARTIR DO SEMESTRE SEGUINTE ao da conclusão; no próprio semestre (ou antes) o controle segue acionável.
     const estagioRow = (cod, nome) => {
-        const done = m.estagios[cod] != null;
-        return `<div class="spread" style="margin-bottom:8px">
-    <div><div style="font-size:12px;font-weight:600">${esc(nome)}</div><div class="muted" style="font-size:10px">${esc(cod)} · 200h</div></div>
-    ${done
-                ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ ${rotuloSem(m.estagios[cod])}</span><button class="btn btn-sm btn-ghost" data-manual="estagio-undo" data-cod="${cod}">✗</button></div>`
-                : `<div class="flx"><select class="manual-sel" data-cod="${cod}" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select><button class="btn btn-sm btn-primary" data-manual="estagio-do" data-cod="${cod}">Concluir</button></div>`}
+        const compSem = m.estagios[cod];
+        const marcado = compSem != null;
+        const locked = marcado && idx > compSem;
+        const cabec = `<div><div style="font-size:12px;font-weight:600">${esc(nome)}</div><div class="muted" style="font-size:10px">${esc(cod)} · 200h</div></div>`;
+        if (locked) return `<div class="spread manual-done" style="margin-bottom:8px;opacity:.4">${cabec}
+    <span class="chip" style="color:var(--success)">✓ Item satisfeito em ${esc(rotuloSem(compSem))}</span></div>`;
+        return `<div class="spread" style="margin-bottom:8px">${cabec}
+    ${marcado
+                ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ Concluído em ${esc(rotuloSem(compSem))}</span><button class="btn btn-sm btn-danger" data-manual="estagio-undo" data-cod="${cod}">Cancelar a conclusão</button></div>`
+                : `<button class="btn btn-sm btn-primary" data-manual="estagio-do" data-cod="${cod}" data-sem="${idx}" data-tip="Marca ${esc(nome)} como concluído em ${esc(rotuloSem(idx))}">Concluir em ${esc(rotuloSem(idx))}</button>`}
 </div>`;
+    };
+    // S11 — item acumulativo por semestre: lança as horas realizadas NAQUELE semestre (campo vem vazio);
+    // o valor soma ao total. Quando o requisito é integralizado, o campo fica desabilitado e opaco.
+    const acumRow = (chave, key, titulo, meta) => {
+        const item = m[chave] || (m[chave] = { porSem: {} });
+        const noSem = item.porSem[idx];
+        const acumAte = somaManualAteSem(item, idx);
+        const satIdx = semIdxItemSatisfeito(key);
+        // trava/opaca + mensagem só A PARTIR DO SEMESTRE SEGUINTE ao que integralizou o item
+        // (no próprio semestre em que satisfaz, o campo segue editável)
+        const locked = satIdx != null && idx > satIdx;
+        const cabec = `<div><div style="font-size:12px;font-weight:600">${esc(titulo)}</div><div class="muted" style="font-size:10px">${esc(meta)} · acum. até ${esc(rotuloSem(idx))}: ${acumAte}h</div></div>`;
+        if (locked) {
+            return `<div class="spread manual-done" style="margin-bottom:8px;opacity:.4">${cabec}
+    <span class="chip" style="color:var(--success)">✓ Item satisfeito em ${esc(rotuloSem(satIdx))}</span></div>`;
+        }
+        return `<div class="spread" style="margin-bottom:8px">${cabec}
+    <div class="flx"><input type="number" min="0" max="330" value="${noSem != null ? noSem : ''}" placeholder="0" data-manual-sem-num="${chave}" data-idx="${idx}" data-tip="Horas realizadas de ${esc(titulo)} em ${esc(rotuloSem(idx))} (soma ao total)" style="width:58px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h <span class="muted" style="font-size:10px">neste sem.</span></div></div>`;
     };
     return `
 ${estagioRow('ICSX51', 'Estágio 1')}
 ${estagioRow('ICSX52', 'Estágio 2')}
-<div class="spread" style="margin-bottom:8px">
-    <div><div style="font-size:12px;font-weight:600">Eletivas externas</div><div class="muted" style="font-size:10px">meta 105h · conta a partir de</div></div>
-    <div class="flx"><input type="number" min="0" max="300" value="${m.eletiva.h || 0}" data-manualnum="eletiva" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
-    <select data-manualsem="eletiva" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.eletiva.sem)}</select></div>
-</div>
-<div class="spread" style="margin-bottom:8px">
-    <div><div style="font-size:12px;font-weight:600">Extensão (CCE)</div><div class="muted" style="font-size:10px">faltam 270h · conta a partir de</div></div>
-    <div class="flx"><input type="number" min="0" max="330" value="${m.extensao.h || 0}" data-manualnum="extensao" style="width:54px;background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">h
-    <select data-manualsem="extensao" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${optsSel(m.extensao.sem)}</select></div>
-</div>
-<div class="spread">
-    <div><div style="font-size:12px;font-weight:600">ENADE Concluinte</div><div class="muted" style="font-size:10px">requisito de formatura</div></div>
-    ${m.enade.done
-            ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ ${rotuloSem(m.enade.sem)}</span><button class="btn btn-sm btn-ghost" data-manual="enade-undo">✗</button></div>`
-            : `<div class="flx"><select data-manualsem="enade" style="background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 6px;font-size:11px">${opts}</select><button class="btn btn-sm btn-primary" data-manual="enade-do">Marcar</button></div>`}
+${acumRow('eletiva', 'eletivas', 'Eletivas externas', 'meta 105h')}
+${acumRow('extensao', 'extensao', 'Extensão (CCE)', 'faltam 270h')}
+${(() => {
+            const compSem = m.enade.sem, marcado = m.enade.done && compSem != null;
+            const locked = marcado && idx > compSem;
+            const cabec = `<div><div style="font-size:12px;font-weight:600">ENADE Concluinte</div><div class="muted" style="font-size:10px">requisito de formatura</div></div>`;
+            if (locked) return `<div class="spread manual-done" style="opacity:.4">${cabec}
+    <span class="chip" style="color:var(--success)">✓ Item satisfeito em ${esc(rotuloSem(compSem))}</span></div>`;
+            return `<div class="spread">${cabec}
+    ${marcado
+                    ? `<div class="flx"><span class="chip" style="color:var(--success)">✓ Concluído em ${esc(rotuloSem(compSem))}</span><button class="btn btn-sm btn-danger" data-manual="enade-undo">Cancelar a conclusão</button></div>`
+                    : `<button class="btn btn-sm btn-primary" data-manual="enade-do" data-sem="${idx}" data-tip="Marca o ENADE Concluinte como realizado em ${esc(rotuloSem(idx))}">Marcar em ${esc(rotuloSem(idx))}</button>`}
 </div>`;
+        })()}`;
 }
 
 function tabHTML(s, i) {
@@ -1630,14 +1801,20 @@ function planoSemestreHTML(sem) {
     // cronograma: durante a edição mostra a grade em edição (prévia ao vivo); senão, a grade ativa
     const calSel = editorAberto ? editorSel(sem) : escolhida.sel;
     const calSem = editorAberto ? Object.assign({}, sem, { trab: trabCalc(sem.idx, calSel) }) : sem;
-    return `
+    const aguardando = sem.aguardandoTrab;   // S2: ainda não respondeu se trabalha neste semestre
+    // S7 — ordem: Avisos → Horários travados → (Cronograma → Grades, só após responder sobre trabalho)
+    const topo = `
 <div class="sem-head"><h2>${sem.rotulo} ${sem.formatura ? '🎓' : ''}</h2>
-<div class="flx">${headAcoes}</div>
+<div class="flx">${aguardando ? '<span class="chip" style="color:var(--secondary)">aguardando resposta sobre trabalho</span>' : headAcoes}</div>
 </div>
 ${banners.join('')}
+${blocosSemestreHTML(sem)}`;
+    if (aguardando) return topo + `
+<div class="banner info" style="margin-top:14px">🕒 Para calcular e exibir o <b>cronograma</b> e as <b>grades possíveis</b> de ${esc(sem.rotulo)}, primeiro responda acima em <b>“Horários travados”</b> se você <b>trabalha neste semestre</b>.
+<span class="b-actions"><button class="btn btn-sm btn-primary" data-abrir-blocos="${sem.idx}">Responder agora</button></span></div>`;
+    return topo + `
 ${(calSel.length || editorAberto) ? calendarHTML(calSem, calSel, editorAberto) : ''}
 ${(calSel.length || editorAberto) ? legendaHTML() : ''}
-${blocosSemestreHTML(sem)}
 <h3 style="margin:22px 0 6px;font-size:15px">🎲 Grades possíveis ${sem.status === 'confirmado' ? '<span class="muted" style="font-weight:400;font-size:12px">— escolha outra para trocar</span>' : '<span class="muted" style="font-weight:400;font-size:12px">— confirme a sugerida acima ou escolha/edite outra</span>'}</h3>
 ${editorAberto ? editorHTML(sem) : ''}
 <div class="grades">${(cards.length ? cards.join('') : '<div class="banner info">Nenhuma grade gerada para este semestre.</div>')}${editorAberto ? '' : montarCard}</div>`;
@@ -1650,14 +1827,15 @@ function gradeCardHTML(g, i, sem, custom) {
     const nblk = g.sel.filter(s => s.bloqueado).length;
     const open = (typeof i === 'number' && i === 0) || isSel;
     const escolhida = sem.status === 'confirmado' && sameGrade(g, sem.grade);
+    const scoreTip = scoreBreakdownTip(sem, g.sel);   // S9 — detalhamento ao passar o mouse
     return `<div class="gcard ${rec ? 'rec' : ''} ${isSel ? 'sel' : ''} ${open ? 'open' : ''}" data-card="${i}">
 <div class="gh" data-toggle-card="${i}">
     <div><div class="gtitle">${custom ? 'Grade personalizada' : 'Grade #' + (i + 1)}${rec ? ' <span class="chip" style="color:var(--secondary)">Recomendada</span>' : ''}</div>
     <div class="gsub">${g.sel.length} disciplinas · ${aulas} aulas/sem · ${nblk ? ('<span style="color:var(--secondary)">' + nblk + ' em conflito</span>') : 'sem conflitos'}</div></div>
-    <div class="score">${typeof g.score === 'number' ? ('<span class="dot"></span> Score: ' + g.score) : ''}</div>
+    <div class="score" data-tip="${scoreTip}">${typeof g.score === 'number' ? ('<span class="dot"></span> Score: ' + g.score) : ''}</div>
 </div>
 <div class="gbody">
-    ${g.sel.map(s => discRowHTML(s)).join('')}
+    ${g.sel.map(s => discRowHTML(s, sem)).join('')}
     <div class="gactions">
     ${escolhida ? '<span class="chip" style="color:var(--success)">✓ Grade escolhida</span>' : `<button class="btn btn-sm btn-primary" data-escolher="${i}">Escolher esta grade</button>`}
     <button class="btn btn-sm btn-ghost" data-editar="${i}" data-sem="${sem.idx}">✏️ Editar</button>
@@ -1667,21 +1845,25 @@ function gradeCardHTML(g, i, sem, custom) {
 }
 function sameGrade(a, b) { if (!a || !b) return false; const ka = a.sel.map(s => s.disciplina.codigo).sort().join(','); const kb = b.sel.map(s => s.disciplina.codigo).sort().join(','); return ka === kb && ka.length > 0; }
 
-function discRowHTML(s) {
+function discRowHTML(s, sem) {
     const d = s.disciplina; const tp = tipoDe(d);
     const tag = tp === 'OBR' ? 'OBR' : tp === 'HUM' ? 'HUM' : tp === 'TRI' ? 'TRI' : tp === 'OPT' ? 'OPT' : 'ELE';
     const turno = s.horarios.length ? [...new Set(s.horarios.map(h => h.periodo))].join('') : '—';
     const reg = D.hist.cursadas.find(c => c.codigo === d.codigo);
     const reprov = reg && reg.situacao === 'REPROVADO';
+    // S4.1 — conflito com o trabalho (permitido por flexibilidade) indicado visualmente na matéria
+    const conflitoTrab = sem && !s.andamento && conflitoTrabalho(s.horarios || [], sem);
     const prereqInfo = d.preRequisitos.map(p => `${p} ${(D.cursadasFinal && D.cursadasFinal.has(p)) ? '✓' : '•'}`).join(', ');
-    const tip = `${esc(d.nome)}\\nCódigo: ${esc(d.codigo)}\\n${s.turma ? ('Turma ' + esc(s.turma.turma) + (s.turma.professor ? (' · ' + esc(s.turma.professor)) : '')) : ''}\\n${s.horarios.map(h => `${K.DIAS[h.diaSemana].slice(0, 3)} ${h.periodo}${h.slot} (${esc(h.sala || '')})`).join(', ')}\\nPré-req: ${prereqInfo || 'nenhum'}\\n${d.chExt > 0 ? ('Extensionista: ' + d.chExt + 'h') : ''}`;
-    return `<div class="disc-row ${s.bloqueado ? 'rascunho' : ''} ${s.andamento ? '' : ''}" data-tip="${esc(tip)}">
+    const tip = `${esc(d.nome)}\\nCódigo: ${esc(d.codigo)}\\n${s.turma ? ('Turma ' + esc(s.turma.turma) + (s.turma.professor ? (' · ' + esc(s.turma.professor)) : '')) : ''}\\n${s.horarios.map(h => `${K.DIAS[h.diaSemana].slice(0, 3)} ${h.periodo}${h.slot} (${esc(h.sala || '')})`).join(', ')}\\nPré-req: ${prereqInfo || 'nenhum'}\\n${d.chExt > 0 ? ('Extensionista: ' + d.chExt + 'h') : ''}${conflitoTrab ? '\\n⚠ Conflita com o horário de trabalho (permitido — horário flexível)' : ''}`;
+    return `<div class="disc-row ${s.bloqueado ? 'rascunho' : ''} ${conflitoTrab ? 'conflito-trab' : ''}" data-tip="${esc(tip)}">
 ${s.andamento ? '<span style="color:var(--secondary)">●</span>' : (s.bloqueado ? '<span style="color:var(--secondary)">⚠</span>' : '<span style="color:var(--success)">✓</span>')}
 <span class="code">${esc(d.codigo)}</span>
 <span class="nm">${esc(d.nome)}${reprov ? ' <span class="muted" style="font-size:10px">(reprovada antes)</span>' : ''}</span>
+${conflitoTrab ? '<span class="chip" style="color:var(--secondary);font-size:10px" data-tip="Esta matéria ocupa um horário de trabalho — permitido porque seus horários são flexíveis">⚠ trabalho</span>' : ''}
 ${d.chExt > 0 ? '<span class="ext-dot" title="Extensionista"></span>' : ''}
 <span class="tag ${tag}">${tag}</span><span class="tag turno">${turno}</span>
 <span class="muted mono" style="font-size:11px">${d.chSemanal}h/sem</span>
+<button class="disc-grafo" data-ir-grafo="${esc(d.codigo)}" data-tip="Ver “${esc(d.nome)}” no grafo de matérias">🗺️</button>
 </div>`;
 }
 
@@ -1757,21 +1939,56 @@ function editorOcup(sem, exclCod) {
     for (const cod of ed.codigos) { if (cod === exclCod) continue; const t = turmaDe(cod, ed.turmas[cod]); if (t) ocup.push(...t.horarios); }
     return ocup;
 }
-function motivoConflito(horarios, sem, ocup) {
+// conflito "duro": com outra matéria da grade ou com bloqueio manual (sempre impede selecionar)
+function conflitoHard(horarios, sem, ocup) {
     for (const h of horarios) if (ocup.some(o => o.diaSemana === h.diaSemana && o.periodo === h.periodo && o.slot === h.slot)) return 'Conflita com outra matéria da grade';
     const blocos = sem.bloqueios || [];
     for (const h of horarios) { const b = blocos.find(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot); if (b) return 'Conflita com o bloqueio “' + b.nome + '”'; }
+    return null;
+}
+function conflitoTrabalho(horarios, sem) {
     const ts = (sem.trab && sem.trab.slots) || [];
     for (const h of horarios) if (ts.some(b => b.diaSemana === h.diaSemana && b.periodo === h.periodo && b.slot === h.slot)) return 'Conflita com o horário de trabalho';
     return null;
 }
+// S4 — estado de uma turma na grade: conflito duro bloqueia; conflito com trabalho só bloqueia se NÃO flexível
+function turmaEstado(horarios, sem, ocup) {
+    const hard = conflitoHard(horarios || [], sem, ocup);
+    if (hard) return { bloqueada: true, avisoTrab: false, motivo: hard };
+    const tw = conflitoTrabalho(horarios || [], sem);
+    if (tw) { const flex = trabFlex(sem.idx); return { bloqueada: !flex, avisoTrab: flex, motivo: tw + (flex ? ' (permitido — horário flexível)' : '') }; }
+    return { bloqueada: false, avisoTrab: false, motivo: null };
+}
+// motivo de conflito que IMPEDE a seleção (usado p/ contagem)
+function motivoConflito(horarios, sem, ocup) { const e = turmaEstado(horarios, sem, ocup); return e.bloqueada ? e.motivo : null; }
+// primeira turma selecionável (sem conflito duro), preferindo as sem conflito de trabalho; respeita flexibilidade
+function melhorTurmaSel(cod, sem, ocup) {
+    const turmas = turmasDe(cod, sem); let fallback = null;
+    for (const t of turmas) {
+        const st = turmaEstado(t.horarios || [], sem, ocup);
+        if (st.bloqueada) continue;
+        if (!st.avisoTrab) return t;        // sem nenhum conflito
+        if (!fallback) fallback = t;        // permitido (flexível) — usa se não houver melhor
+    }
+    return fallback;
+}
+// S6 — acréscimo de score ao adicionar `cod` (com `turma`) a uma seleção base
+function scoreDeltaCod(sem, baseSel, cod, turma) {
+    const w = trabDoSem(sem.idx), cur = sem.cursadasAntes || new Set(), fo = sem.faltObrig || new Set();
+    const base = K.pontuarSel(D.ctx, baseSel, cur, fo, S.preferencias, sem.bloqueios || [], w);
+    const d = D.byCod.get(cod); const t = turma || turmaDe(cod, null);
+    const com = K.pontuarSel(D.ctx, baseSel.concat([{ disciplina: d, turma: t, horarios: t ? t.horarios : [] }]), cur, fo, S.preferencias, sem.bloqueios || [], w);
+    return Math.round(com - base);
+}
+const fmtDelta = v => (v >= 0 ? '+' : '') + v;
 function horResumo(t) { return t.horarios && t.horarios.length ? t.horarios.map(h => K.DIAS[h.diaSemana].slice(0, 3) + ' ' + h.periodo + h.slot).join(' ') : 'sem horário'; }
 function turmaChip(cod, t, sem, sel, ocup) {
-    const reason = motivoConflito(t.horarios || [], sem, ocup);
+    const st = turmaEstado(t.horarios || [], sem, ocup);
     const prio = t.prioridadeSI != null ? ` · prioridade ${t.prioridadeSI}` : '';
-    const tip = `Turma ${esc(t.turma)}${t.reserva ? (' · ' + esc(t.reserva)) : ''}${prio}\\n${esc(horResumo(t))}${t.professor ? ('\\nProf. ' + esc(t.professor)) : ''}${reason ? ('\\n⛔ ' + esc(reason)) : ''}`;
-    const attrs = reason ? `data-tip="${tip}"` : `data-ed-turma="${esc(cod)}" data-turma="${esc(t.turma)}" data-sem="${sem.idx}" data-tip="${tip}"`;
-    return `<span class="ed-turma ${sel ? 'sel ' : ''}${reason ? 'conflito' : ''}" ${attrs}>${esc(t.turma)} <span class="muted">${esc(horResumo(t))}</span></span>`;
+    const tip = `Turma ${esc(t.turma)}${t.reserva ? (' · ' + esc(t.reserva)) : ''}${prio}\\n${esc(horResumo(t))}${t.professor ? ('\\nProf. ' + esc(t.professor)) : ''}${st.motivo ? ('\\n' + (st.bloqueada ? '⛔ ' : '⚠ ') + esc(st.motivo)) : ''}`;
+    const cls = st.bloqueada ? 'conflito' : (st.avisoTrab ? 'conflito-trab' : '');
+    const attrs = st.bloqueada ? `data-tip="${tip}"` : `data-ed-turma="${esc(cod)}" data-turma="${esc(t.turma)}" data-sem="${sem.idx}" data-tip="${tip}"`;
+    return `<span class="ed-turma ${sel ? 'sel ' : ''}${cls}" ${attrs}>${esc(t.turma)} <span class="muted">${esc(horResumo(t))}</span>${st.avisoTrab ? ' <span style="color:var(--secondary)">⚠</span>' : ''}</span>`;
 }
 function editorHTML(sem) {
     const ed = S.editor; if (!ed || ed.idx !== sem.idx) return '';
@@ -1780,37 +1997,50 @@ function editorHTML(sem) {
     const selRaw = ed.codigos.map(cod => { const d = D.byCod.get(cod); const t = turmaDe(cod, ed.turmas[cod]); return { disciplina: d, turma: t, horarios: t ? t.horarios : [] }; }).filter(x => x.disciplina);
     const score = K.pontuarSel(D.ctx, selRaw, sem.cursadasAntes || new Set(), sem.faltObrig || new Set(), S.preferencias, sem.bloqueios || [], trabDoSem(sem.idx));
     const nConf = selRaw.filter(s => motivoConflito(s.horarios, sem, editorOcup(sem, s.disciplina.codigo))).length;
+    const nTrabAviso = selRaw.filter(s => turmaEstado(s.horarios, sem, editorOcup(sem, s.disciplina.codigo)).avisoTrab).length;
     const rows = ed.codigos.map(cod => {
         const d = D.byCod.get(cod); if (!d) return '';
         const turmas = turmasDe(cod, sem); const ocup = editorOcup(sem, cod);
         const chips = turmas.map(t => turmaChip(cod, t, sem, ed.turmas[cod] === t.turma, ocup)).join('');
         let substBox = '';
         if (ed.subst === cod) {
+            const ocupSem = editorOcup(sem, cod);                                  // ocupação da grade sem a matéria substituída
+            const baseSemCod = selRaw.filter(s => s.disciplina.codigo !== cod);
             const mesmaArea = (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo) && tipoDe(c.disciplina) === tipoDe(d));
-            const subs = mesmaArea.length ? mesmaArea : (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo));
-            const lista = subs.map(c => `<span class="ed-sub" data-ed-substituir="${esc(cod)}" data-novo="${esc(c.disciplina.codigo)}" data-sem="${sem.idx}">${esc(c.disciplina.codigo)} ${esc(c.disciplina.nome)}</span>`).join('') || '<span class="muted">sem substitutas disponíveis</span>';
-            substBox = `<div class="ed-subbox"><div class="muted" style="margin-bottom:4px">Substituir “${esc(d.nome)}” por uma matéria disponível:</div>${lista}</div>`;
+            let subs = mesmaArea.length ? mesmaArea : (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo));
+            // S4.3 — só substitutas que PODEM ser selecionadas na grade atual (1ª turma sem conflito) e S6 — ordenadas por acréscimo de score
+            subs = subs.map(c => ({ c, t: melhorTurmaSel(c.disciplina.codigo, sem, ocupSem) })).filter(x => x.t)
+                .map(x => Object.assign(x, { delta: scoreDeltaCod(sem, baseSemCod, x.c.disciplina.codigo, x.t) }))
+                .sort((a, b) => b.delta - a.delta);
+            const lista = subs.map(({ c, t, delta }) => `<span class="ed-sub" data-ed-substituir="${esc(cod)}" data-novo="${esc(c.disciplina.codigo)}" data-sem="${sem.idx}" data-tip="Turma ${esc(t.turma)} · ${esc(horResumo(t))}">${esc(c.disciplina.codigo)} ${esc(c.disciplina.nome)} <span class="ed-delta ${delta >= 0 ? 'pos' : 'neg'}">${fmtDelta(delta)}</span></span>`).join('') || '<span class="muted">sem substitutas disponíveis sem conflito</span>';
+            substBox = `<div class="ed-subbox"><div class="muted" style="margin-bottom:4px">Substituir “${esc(d.nome)}” por uma matéria disponível (sem conflito · ordenadas por +score):</div>${lista}</div>`;
         }
         return `<div class="ed-row">
     <div class="ed-rowh"><button class="ed-x" data-ed-rm="${esc(cod)}" data-sem="${sem.idx}" title="Remover da grade">✕</button>
     <span class="code">${esc(cod)}</span><span class="nm">${esc(d.nome)}</span><span class="tag ${tipoDe(d)}">${tipoDe(d)}</span>
+    <button class="disc-grafo" data-ir-grafo="${esc(cod)}" data-tip="Ver “${esc(d.nome)}” no grafo de matérias">🗺️</button>
     ${ehProximo ? `<button class="btn btn-sm btn-ghost ed-subbtn ${ed.subst === cod ? 'on' : ''}" data-ed-subst="${esc(cod)}" data-sem="${sem.idx}">↔ Matéria indisponível</button>` : ''}</div>
     <div class="ed-turmas">${chips || '<span class="muted">sem turma ofertada</span>'}</div>${substBox}</div>`;
     }).join('');
-    const disp = (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo)).map(c => {
-        const d = c.disciplina; const ocup = editorOcup(sem, null);
-        const chips = c.turmas.map(t => turmaChip(d.codigo, t, sem, false, ocup)).join('');
-        return `<div class="ed-disc"><div class="ed-rowh"><span class="code">${esc(d.codigo)}</span><span class="nm">${esc(d.nome)}</span><span class="tag ${tipoDe(d)}">${tipoDe(d)}</span></div><div class="ed-turmas">${chips || '<span class="muted">sem turma ofertada</span>'}</div></div>`;
+    // S6 — lista de disponíveis ordenada pelo acréscimo de score (usando a 1ª turma selecionável)
+    const ocupAll = editorOcup(sem, null);
+    const dispCand = (sem.candidatas || []).filter(c => !ed.codigos.includes(c.disciplina.codigo))
+        .map(c => { const t = melhorTurmaSel(c.disciplina.codigo, sem, ocupAll) || c.turmas[0] || null; return { c, t, delta: scoreDeltaCod(sem, selRaw, c.disciplina.codigo, t) }; })
+        .sort((a, b) => b.delta - a.delta);
+    const disp = dispCand.map(({ c, delta }) => {
+        const d = c.disciplina;
+        const chips = c.turmas.map(t => turmaChip(d.codigo, t, sem, false, ocupAll)).join('');
+        return `<div class="ed-disc"><div class="ed-rowh"><span class="code">${esc(d.codigo)}</span><span class="nm">${esc(d.nome)}</span><span class="tag ${tipoDe(d)}">${tipoDe(d)}</span><span class="ed-delta ${delta >= 0 ? 'pos' : 'neg'}" data-tip="Acréscimo de score ao adicionar esta matéria">${fmtDelta(delta)}</span><button class="disc-grafo" data-ir-grafo="${esc(d.codigo)}" data-tip="Ver “${esc(d.nome)}” no grafo de matérias">🗺️</button></div><div class="ed-turmas">${chips || '<span class="muted">sem turma ofertada</span>'}</div></div>`;
     }).join('');
     return `<div class="editor" id="editor-${sem.idx}">
 <div class="ed-head"><h3>✏️ ${ed.base ? 'Editando grade' : 'Montar grade'} — ${esc(sem.rotulo)}</h3>
-    <div class="ed-actions"><span class="score"><span class="dot"></span> Score ${score}${nConf ? ` · <span style="color:var(--secondary)">${nConf} em conflito</span>` : ''}</span>
+    <div class="ed-actions"><span class="score" data-tip="${SCORE_TIP}"><span class="dot"></span> Score ${score}${nConf ? ` · <span style="color:var(--secondary)">${nConf} em conflito</span>` : ''}${nTrabAviso ? ` · <span style="color:var(--secondary)">${nTrabAviso} sobre trabalho (flexível)</span>` : ''}</span>
     <button class="btn btn-sm btn-primary" data-ed-salvar="${sem.idx}" ${ed.codigos.length ? '' : 'disabled'}>Salvar como nova grade personalizada</button>
     <button class="btn btn-sm btn-ghost" data-ed-limpar="${sem.idx}">Limpar</button>
     <button class="btn btn-sm btn-ghost" data-ed-fechar="1">Fechar</button></div></div>
 <div class="ed-cols">
     <div class="ed-col"><div class="ed-coltitle">Na grade (${ed.codigos.length})</div>${rows || '<div class="muted" style="padding:10px">Nenhuma matéria ainda — clique numa turma da lista ao lado para adicionar.</div>'}</div>
-    <div class="ed-col"><div class="ed-coltitle">Disponíveis <span class="muted" style="font-weight:400">— clique numa turma p/ adicionar; turmas riscadas conflitam</span></div>${disp || '<div class="muted" style="padding:10px">Todas as matérias disponíveis já estão na grade.</div>'}</div>
+    <div class="ed-col"><div class="ed-coltitle">Disponíveis <span class="muted" style="font-weight:400">— ordenadas por +score; clique numa turma p/ adicionar; turmas riscadas conflitam</span></div>${disp || '<div class="muted" style="padding:10px">Todas as matérias disponíveis já estão na grade.</div>'}</div>
 </div></div>`;
 }
 
@@ -1862,7 +2092,9 @@ async function onClick(e) {
     const tu = t.closest('[data-turno]'); if (tu) { const k = tu.dataset.turno; const a = S.preferencias.turnos; const i = a.indexOf(k); if (i >= 0) { if (a.length > 1) a.splice(i, 1); } else a.push(k); salvar(); renderPreferencias(); return; }
     const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = true; limparEscolhasApos(i); rerenderKeepOpen(); return; }
     const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = false; limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const tf = t.closest('[data-trab-flex]'); if (tf) { const i = +tf.dataset.trabFlex; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = !S.trabalho[i].flexivel; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const tfs = t.closest('[data-trab-flex-sim]'); if (tfs) { const i = +tfs.dataset.trabFlexSim; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = true; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const tfn = t.closest('[data-trab-flex-nao]'); if (tfn) { const i = +tfn.dataset.trabFlexNao; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = false; limparEscolhasApos(i); rerenderKeepOpen(); return; }
+    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; const n = aplicarTrabSeguintes(i); toast(n ? `Aplicado a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
     const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; S.trabalho[i] = K.normTrab(S.trabalho[i]); const a = S.trabalho[i].diasPreferidos, p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); limparEscolhasApos(i); rerenderKeepOpen(); return; }
     const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho “${p.nome}”?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
     const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
@@ -1875,6 +2107,8 @@ async function onClick(e) {
     // grafo de matérias
     if (t.closest('#ver-grafo')) { S.fase = 'grafo'; salvar(); render(); return; }
     if (t.closest('#voltar-plano')) { S.fase = 'app'; salvar(); render(); return; }
+    // S10 — "ver no grafo" a partir de uma matéria da grade/editor
+    const ig = t.closest('[data-ir-grafo]'); if (ig) { _grafoFocus = ig.dataset.irGrafo; S.fase = 'grafo'; salvar(); render(); return; }
     const gn = t.closest('[data-grafo-node]'); if (gn) { selecionarNoGrafo(gn.dataset.grafoNode); return; }
     if (t.closest('#grafo-limpar')) { selecionarNoGrafo(null); return; }
     if (t.closest('#grafo-ajustar')) { if (window.__grafoFit) window.__grafoFit(); return; }
@@ -1915,15 +2149,23 @@ function onInput(e) {
     }
 }
 function onChange(e) {
-    const mnum = e.target.closest('[data-manualnum]');
-    if (mnum) { S.manuais[mnum.dataset.manualnum].h = +mnum.value || 0; salvar(); render(); return; }
-    const msem = e.target.closest('[data-manualsem]');
-    if (msem) { const k = msem.dataset.manualsem; if (k === 'enade') return; S.manuais[k].sem = +msem.value; salvar(); render(); return; }
+    // S11 — horas realizadas de um item acumulativo naquele semestre
+    const msn = e.target.closest('[data-manual-sem-num]');
+    if (msn) {
+        const chave = msn.dataset.manualSemNum, i = +msn.dataset.idx, v = +msn.value || 0;
+        const item = S.manuais[chave] || (S.manuais[chave] = { porSem: {} });
+        if (v > 0) item.porSem[i] = v; else delete item.porSem[i];
+        salvar(); render(); return;
+    }
     const tr = e.target.closest('[data-trab]');
     if (tr) {
         const i = +tr.dataset.sem, k = tr.dataset.trab; S.trabalho[i] = K.normTrab(S.trabalho[i]);
         const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
-        S.trabalho[i][k] = numericos[k] ? (+tr.value || 0) : tr.value; limparEscolhasApos(i); rerenderKeepOpen(); return;
+        // horário fixo (não flexível): "Começar às" e "Terminar às" definem toda a janela
+        if (k === 'comeco') { const wt = S.trabalho[i]; wt.inicio = wt.maxComeco = wt.desejInicio = tr.value; }
+        else if (k === 'termino') { const wt = S.trabalho[i]; wt.fim = wt.minFim = wt.desejFim = tr.value; }
+        else S.trabalho[i][k] = numericos[k] ? (+tr.value || 0) : tr.value;
+        limparEscolhasApos(i); rerenderKeepOpen(); return;
     }
 }
 
@@ -2025,7 +2267,9 @@ function editorRm(cod) { const ed = S.editor; if (!ed) return; ed.codigos = ed.c
 function editorSubst(cod) { const ed = S.editor; if (!ed) return; ed.subst = ed.subst === cod ? null : cod; render(); }
 function editorSubstituir(cod, novo) {
     const ed = S.editor; if (!ed) return; const i = ed.codigos.indexOf(cod); if (i < 0) return;
-    const sem = D.projecao.find(s => s.idx === ed.idx); const t = turmasDe(novo, sem)[0];
+    const sem = D.projecao.find(s => s.idx === ed.idx);
+    // S4.3 — escolhe a 1ª turma selecionável (sem conflito) na grade já montada
+    const ocupSem = editorOcup(sem, cod); const t = melhorTurmaSel(novo, sem, ocupSem) || turmasDe(novo, sem)[0];
     ed.codigos[i] = novo; delete ed.turmas[cod]; ed.turmas[novo] = t ? t.turma : null; ed.subst = null; salvar(); render();
 }
 function editorSalvar() {
@@ -2039,9 +2283,10 @@ function fecharEditor() { S.editor = null; salvar(); render(); }
 function delCustom(semIdx, i) { if (S.custom[semIdx]) { S.custom[semIdx].splice(i, 1); if (!S.custom[semIdx].length) delete S.custom[semIdx]; } salvar(); render(); }
 function manualAction(btn) {
     const a = btn.dataset.manual, cod = btn.dataset.cod, m = S.manuais;
-    if (a === 'estagio-do') { const selEl = $(`.manual-sel[data-cod="${cod}"]`); m.estagios[cod] = selEl ? +selEl.value : 1; }
+    const sem = btn.dataset.sem != null ? +btn.dataset.sem : (S.abaAtiva || 0);   // conclui no semestre em exibição
+    if (a === 'estagio-do') { m.estagios[cod] = sem; }
     if (a === 'estagio-undo') { delete m.estagios[cod]; }
-    if (a === 'enade-do') { const sel = $('[data-manualsem="enade"]'); m.enade = { done: true, sem: sel ? +sel.value : 0 }; }
+    if (a === 'enade-do') { m.enade = { done: true, sem }; }
     if (a === 'enade-undo') { m.enade = { done: false, sem: null }; }
     salvar(); render();
 }
