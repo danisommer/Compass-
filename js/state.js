@@ -9,7 +9,7 @@ function novoEstado() {
     return {
         fase: 'upload', files: { matriz: null, historico: null, gnh: null }, parsed: { matriz: null, historico: null, gnh: null },
         equivalencias: {}, divergPendentes: [], preferencias: structuredClone(DEFAULT_PREF), bloqueios: {}, trabalho: {}, trabPresets: [],
-        trabRascunho: {},
+        trabRascunho: {}, bloqRascunho: {},
         escolhas: {}, custom: {}, editor: null, manuais: { estagios: {}, eletiva: { porSem: {} }, extensao: { porSem: {} }, enade: { done: false, sem: null } },
         abaAtiva: 0, sidebarCollapsed: false
     };
@@ -17,7 +17,7 @@ function novoEstado() {
 function salvar() { try { const c = structuredClone(S); delete c.files; delete c.trabPresets; localStorage.setItem('compass_state', JSON.stringify(c)); salvarPresets(); } catch (e) { console.warn(e); } }
 function carregar() {
     try {
-        const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = []; if (!o.trabRascunho) o.trabRascunho = {};
+        const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = []; if (!o.trabRascunho) o.trabRascunho = {}; if (!o.bloqRascunho) o.bloqRascunho = {};
         for (const k in o.trabalho) { o.trabalho[k] = K.normTrab(o.trabalho[k]); }   // migra estados antigos (campos novos)
         o.trabPresets.forEach(p => { p.cfg = K.normTrab(p.cfg); });
         // migra itens manuais acumulativos (eletiva/extensão) p/ o modelo por-semestre {porSem:{idx:horas}}
@@ -39,13 +39,15 @@ function manualBlocos(idx) { return (S.bloqueios && S.bloqueios[idx]) || []; }
 function trabDoSem(idx) { return (S.trabalho && S.trabalho[idx]) || null; }
 // S2: o usuário já respondeu se trabalha (Sim/Não) neste semestre?
 function trabRespondido(idx) { const w = trabDoSem(idx); return !!w && (w.trabalha === true || w.trabalha === false); }
-function trabFlex(idx) { const w = trabDoSem(idx); return !!(w && w.trabalha && w.flexivel); }
+// "horário flexível" p/ a UI = pode variar o início/fim entre os dias → aula sobre o trabalho é permitida
+// (encaixa ao redor). Quando FALSE, o horário é fixo e trava a grade.
+function trabFlex(idx) { const w = trabDoSem(idx); return !!(w && w.trabalha && w.varHorario); }
 // blocos de trabalho (auto) calculados a partir de uma seleção de grade
 function trabCalc(idx, sel) { return K.blocosTrabalhoCalc(trabDoSem(idx), K.ocupacaoPorDia(sel || [])); }
 function totalBloqueios() { let n = 0; for (const i in (S.bloqueios || {})) n += S.bloqueios[i].length; return n; }
 
 /* ---- Configurações de trabalho nomeadas (presets, globais) ---- */
-const TRAB_CFG_KEYS = ['horas', 'inicio', 'maxComeco', 'minFim', 'fim', 'flexivel', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos', 'folga'];
+const TRAB_CFG_KEYS = ['horas', 'inicio', 'maxComeco', 'minFim', 'fim', 'varHoras', 'varHorario', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos', 'folga'];
 function trabCfgDe(w) { const n = K.normTrab(w); const o = {}; TRAB_CFG_KEYS.forEach(k => o[k] = k === 'diasPreferidos' ? n[k].slice().sort() : n[k]); return o; }
 function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return TRAB_CFG_KEYS.every(k => k === 'diasPreferidos' ? (x[k].join(',') === y[k].join(',')) : (x[k] === y[k])); }
 function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabRascunhoOuSalvo(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
@@ -202,11 +204,23 @@ function projetar() {
         const pontuar = g => { if (g) g.score = K.pontuarSel(D.ctx, g.sel, curIdx, faltObrig, S.preferencias, manuais, w); return g; };
         const pers = (S.custom[idx] || []).map(c => pontuar(reconstruirGrade(c, curIdx, manuais))).filter(Boolean);
 
+        // Recomendada/sugerida = a grade de MAIOR score DENTRO das restrições — em todos os casos.
+        // Base: a melhor grade gerada (já vem ordenada por score e respeita carga máx./trabalho).
+        // Uma grade personalizada só pode assumir a recomendação se também respeitar as restrições
+        // (≤ carga máx. e sem horário em conflito com bloqueio).
+        const respeitaRestr = g => g && g.sel && g.sel.length <= S.preferencias.cargaMax && !g.sel.some(s => s.bloqueado);
+        const candRec = [];
+        if (grades[0]) candRec.push({ g: grades[0], key: 0 });
+        pers.forEach((g, i) => { if (respeitaRestr(g)) candRec.push({ g, key: 'p' + i }); });
+        let rec = null;
+        for (const o of candRec) if (!rec || (o.g.score || 0) > (rec.g.score || 0)) rec = o;
+        const recKey = rec ? rec.key : null;
+
         // escolha do usuário?
         const esc = S.escolhas[idx];
         let escolhida = null, confirmada = false;
         if (esc) { escolhida = pontuar(reconstruirGrade(esc, curIdx, manuais)); confirmada = true; }
-        if (!escolhida) escolhida = grades[0] || { sel: [] };
+        if (!escolhida) escolhida = (rec && rec.g) || { sel: [] };
 
         // aplica disciplinas não-rascunho
         const add = escolhida.sel.filter(s => !s.bloqueado).map(s => s.disciplina.codigo);
@@ -220,7 +234,7 @@ function projetar() {
 
         sems.push({
             idx, rotulo: rotuloSem(idx), status: confirmada ? 'confirmado' : 'futuro',
-            grade: escolhida, grades, personalizadas: pers, escolhida: confirmada, horas, candidatas: ord,
+            grade: escolhida, grades, personalizadas: pers, recKey, escolhida: confirmada, horas, candidatas: ord,
             manuais: manuaisAqui, formatura, estourou: ger.estourou, inviavel: grades.length === 0,
             bloqueios: manuais, trab: trabCalc(idx, escolhida.sel), cursadasAntes: curIdx, faltObrig,
             aguardandoTrab: !trabRespondido(idx)   // S2: só exibe cronograma/grades após responder se trabalha
@@ -248,10 +262,33 @@ function reconstruirGrade(escolha, cursadas, blocos) {
 function blocoExiste(idx, d, p, s) { const a = manualBlocos(idx); return a.some(b => b.diaSemana === d && b.periodo === p && b.slot === s); }
 function addBloco(idx, d, p, s, nome) { S.bloqueios[idx] = S.bloqueios[idx] || []; if (!blocoExiste(idx, d, p, s)) S.bloqueios[idx].push({ diaSemana: d, periodo: p, slot: s, nome: nome || 'Bloqueio' }); }
 function rmBloco(idx, d, p, s) { const a = S.bloqueios[idx]; if (!a) return; const i = a.findIndex(b => b.diaSemana === d && b.periodo === p && b.slot === s); if (i >= 0) a.splice(i, 1); if (a && !a.length) delete S.bloqueios[idx]; }
+/* ---- Rascunho dos bloqueios manuais — como o rascunho de trabalho, só afeta as grades no "Aplicar" ---- */
+function chaveBloq(a) { return (a || []).map(b => `${b.diaSemana}-${b.periodo}-${b.slot}:${b.nome || ''}`).sort().join(','); }
+function bloqRascunhoAtivo(idx) { return !!(S.bloqRascunho && Object.prototype.hasOwnProperty.call(S.bloqRascunho, idx)); }
+// há diferença pendente entre o rascunho de bloqueios e o salvo?
+function bloqTemRascunho(idx) { return bloqRascunhoAtivo(idx) && chaveBloq(S.bloqRascunho[idx]) !== chaveBloq(manualBlocos(idx)); }
+// lista de bloqueios efetiva p/ EXIBIÇÃO (rascunho se ativo; senão o salvo)
+function bloqEfetivos(idx) { return bloqRascunhoAtivo(idx) ? S.bloqRascunho[idx] : manualBlocos(idx); }
+function bloqRascunhoInit(idx) { if (!S.bloqRascunho) S.bloqRascunho = {}; if (!bloqRascunhoAtivo(idx)) S.bloqRascunho[idx] = manualBlocos(idx).map(b => ({ ...b })); return S.bloqRascunho[idx]; }
+function blocoExisteRasc(idx, d, p, s) { return bloqRascunhoInit(idx).some(b => b.diaSemana === d && b.periodo === p && b.slot === s); }
+function addBlocoRasc(idx, d, p, s, nome) { const a = bloqRascunhoInit(idx); if (!a.some(b => b.diaSemana === d && b.periodo === p && b.slot === s)) a.push({ diaSemana: d, periodo: p, slot: s, nome: nome || 'Bloqueio' }); }
+function rmBlocoRasc(idx, d, p, s) { const a = bloqRascunhoInit(idx); const i = a.findIndex(b => b.diaSemana === d && b.periodo === p && b.slot === s); if (i >= 0) a.splice(i, 1); }
+// aplica o rascunho de bloqueios ao estado salvo; retorna true se havia rascunho ativo
+function bloqAplicarRascunho(idx) {
+    if (!bloqRascunhoAtivo(idx)) return false;
+    const a = S.bloqRascunho[idx];
+    if (a && a.length) S.bloqueios[idx] = a.map(b => ({ ...b })); else delete S.bloqueios[idx];
+    delete S.bloqRascunho[idx];
+    return true;
+}
+function bloqDescartarRascunho(idx) { if (S.bloqRascunho) delete S.bloqRascunho[idx]; }
 function limparEscolhasApos(idx) { let n = 0; for (const k in S.escolhas) if (+k > idx) { delete S.escolhas[k]; n++; } return n; }
+// como limparEscolhasApos, mas inclui o próprio semestre `idx` — força recálculo da grade do
+// semestre alterado E dos seguintes (ao mudar trabalho/bloqueios/horários travados).
+function limparEscolhasDesde(idx) { let n = 0; for (const k in S.escolhas) if (+k >= idx) { delete S.escolhas[k]; n++; } return n; }
 
 function setEstado(v) { S = v; }
 
 export {
-    DEFAULT_PREF, S, D, novoEstado, salvar, carregar, PRESETS_KEY, salvarPresets, carregarPresets, hidratarPresets, ORDER, manualBlocos, trabDoSem, trabRespondido, trabFlex, trabCalc, totalBloqueios, TRAB_CFG_KEYS, trabCfgDe, mesmaCfgTrab, salvarPresetTrab, aplicarPresetTrab, excluirPresetTrab, trabRascunhoOuSalvo, trabTemRascunho, trabRascunhoSet, trabAplicarRascunho, trabDescartarRascunho, aplicarTrabSeguintes, derive, turmaDe, tipoDe, rotuloSem, manualNoSem, somaManualAteSem, extrasAteSem, cursadasComManuais, formaturaOK, calcHorasIdx, projetar, reconstruirGrade, blocoExiste, addBloco, rmBloco, limparEscolhasApos, setEstado
+    DEFAULT_PREF, S, D, novoEstado, salvar, carregar, PRESETS_KEY, salvarPresets, carregarPresets, hidratarPresets, ORDER, manualBlocos, trabDoSem, trabRespondido, trabFlex, trabCalc, totalBloqueios, TRAB_CFG_KEYS, trabCfgDe, mesmaCfgTrab, salvarPresetTrab, aplicarPresetTrab, excluirPresetTrab, trabRascunhoOuSalvo, trabTemRascunho, trabRascunhoSet, trabAplicarRascunho, trabDescartarRascunho, aplicarTrabSeguintes, derive, turmaDe, tipoDe, rotuloSem, manualNoSem, somaManualAteSem, extrasAteSem, cursadasComManuais, formaturaOK, calcHorasIdx, projetar, reconstruirGrade, blocoExiste, addBloco, rmBloco, bloqEfetivos, bloqTemRascunho, blocoExisteRasc, addBlocoRasc, rmBlocoRasc, bloqAplicarRascunho, bloqDescartarRascunho, limparEscolhasApos, limparEscolhasDesde, setEstado
 };

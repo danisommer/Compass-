@@ -60,20 +60,38 @@ const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} 
 for (const [p, s] of ORDEM_SLOTS) { const a = SLOTS[p][s]; SLOT_MIN[p + s] = { ini: hhmmMin(a[0]), fim: hhmmMin(a[1]) }; }
 const DEFAULT_TRAB = {
     trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '18:00',
-    flexivel: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
+    // Dois eixos de flexibilidade (antes um único `flexivel`):
+    //  varHoras  = pode variar a quantidade de horas por dia (distribuição desigual).
+    //  varHorario = pode variar o horário de início/fim entre os dias (trabalho se encaixa ao redor das
+    //               aulas). Quando FALSE, o horário é FIXO e TRAVA a grade: nenhuma aula pode ocupá-lo.
+    varHoras: false, varHorario: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
 };  // trabalha: null = não respondido | true = Sim | false = Não
 // trabRascunho is managed externally in S.trabRascunho
 // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
 function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
-function normTrab(w) { const o = Object.assign({}, DEFAULT_TRAB, w || {}); o.diasPreferidos = Array.isArray(o.diasPreferidos) ? o.diasPreferidos.slice() : []; return o; }
+function normTrab(w) {
+    const o = Object.assign({}, DEFAULT_TRAB, w || {});
+    o.diasPreferidos = Array.isArray(o.diasPreferidos) ? o.diasPreferidos.slice() : [];
+    // migração do modelo antigo: o campo único `flexivel` vira os dois eixos
+    if (w && w.flexivel !== undefined) {
+        if (w.varHoras === undefined) o.varHoras = !!w.flexivel;
+        if (w.varHorario === undefined) o.varHorario = !!w.flexivel;
+    }
+    delete o.flexivel;
+    return o;
+}
 function fmtHHMM(min) { const h = Math.floor(min / 60), m = Math.round(min % 60); return `${String(h).padStart(2, '0')}h${String(m).padStart(2, '0')}`; }
 function fmtDur(h) { const tot = Math.round(h * 60), hh = Math.floor(tot / 60), mm = tot % 60; return mm ? `${hh}h${String(mm).padStart(2, '0')}` : `${hh}h`; }
 
 function janelaTrab(w) {
     w = normTrab(w);
-    let ini = hhmmMin(w.inicio), fim = hhmmMin(w.fim), maxIni = hhmmMin(w.maxComeco), minFim = hhmmMin(w.minFim);
-    if (maxIni < ini) maxIni = ini;
-    if (minFim > fim) minFim = fim;
+    const ini = hhmmMin(w.inicio), fim = hhmmMin(w.fim);
+    // Núcleo (sempre trabalhado) = janela INTEIRA apenas no bloco totalmente fixo (horário fixo + horas iguais),
+    // em que o trabalho ocupa toda a janela todo dia. Nos demais casos o núcleo é 0:
+    //  • horário flexível → o bloco se MOLDA ao redor das aulas dentro de [ini, fim];
+    //  • horas variáveis → a carga se distribui livremente dentro da janela.
+    const blocoFixo = !w.varHorario && !w.varHoras;
+    let maxIni = ini, minFim = blocoFixo ? fim : ini;
     if (minFim < maxIni) minFim = maxIni;                        // núcleo >= 0
     return { ini, fim, maxIni, minFim, coreH: Math.max(0, (minFim - maxIni) / 60), maxH: Math.max(0, (fim - ini) / 60) };
 }
@@ -137,7 +155,7 @@ function alocarTrab(w, infoPorDia) {
     let conflitosNucleo = 0; dias.forEach(d => { if (!infoPorDia[d].coreLivre && J.coreH > 0) conflitosNucleo++; });
     if (!dias.length || alvoSem <= 0) return { horasPorDia, deficit: 0, rigidConf: 0, conflitosNucleo };
 
-    if (!w.flexivel) {                                        // sem flexibilidade: meta igual por dia (COMANDO MÁXIMO)
+    if (!w.varHoras) {                                       // não pode variar horas: meta igual por dia (COMANDO MÁXIMO)
         const alvo = alvoSem / dias.length; let deficit = 0, rigidConf = 0;
         dias.forEach(d => {
             const cap = capH(d);
@@ -148,18 +166,11 @@ function alocarTrab(w, infoPorDia) {
         return { horasPorDia, deficit, rigidConf, conflitosNucleo };
     }
 
-    // dias flexíveis (determinístico: preferidos primeiro, depois Seg→Sex)
-    const N = Math.max(0, Math.min(dias.length, Math.round(+w.diasVariaveis || 0)));
-    const pref = (w.diasPreferidos || []).filter(d => dias.includes(d));
-    const resto = dias.filter(d => !pref.includes(d));
-    const flex = new Set([...pref, ...resto].slice(0, N));
+    // Horas variáveis: TODOS os dias podem variar (a seleção de dias específicos foi removida).
+    // Cada dia começa no máximo que cabe livre (recortado pelas aulas) e depois ajusta p/ fechar o total.
     const piso = d => Math.min(J.coreH, capH(d));               // mínimo do dia (núcleo)
-
-    // dias FIXOS: ficam no horário preferido (recortado por aula); aula sobre o preferido = conflito rígido
     let rigidConf = 0;
-    dias.forEach(d => { if (!flex.has(d)) { horasPorDia[d] = Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); if (!infoPorDia[d].prefLivre) rigidConf++; } });
-    // dias FLEXÍVEIS: começam no preferido (recortado) e só depois ajustam p/ fechar o total
-    const flexDias = dias.filter(d => flex.has(d));
+    const flexDias = dias.slice();
     flexDias.forEach(d => { horasPorDia[d] = Math.max(piso(d), Math.min(infoPorDia[d].prefFitH, capH(d))); });
 
     let delta = alvoSem - dias.reduce((a, d) => a + horasPorDia[d], 0);
@@ -662,7 +673,9 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
     // disponíveis, mesmo as de período futuro que a prioridade rebaixa (cada obrigatória pesa muito
     // no score). Antes truncávamos em 14 por prioridade e perdíamos obrigatórias mal ranqueadas.
     const pool = candOrdenadas.filter((c, i) => i < 18 || !c.disciplina.isOpcional);
-    const grades = []; let nodes = 0;
+    const grades = [];          // grades que atingem o mínimo de disciplinas
+    const parciais = [];        // melhores grades possíveis ABAIXO do mínimo (fallback p/ oferta insuficiente)
+    let nodes = 0;
     const trab = trabConfig && trabConfig.trabalha && (+trabConfig.horas > 0) ? trabConfig : null;
 
     function score(sel) {
@@ -679,16 +692,17 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
             grades.push({ sel: sel.map(s => ({ ...s })), score: score(sel) });
         }
         if (sel.length >= max) return;
+        let estendeu = false;
         for (let i = idx; i < pool.length; i++) {
             const c = pool[i];
             // escolher melhor turma viável (sem conflito; bloqueio vira rascunho)
             let chosen = null;
             for (const t of c.turmas) {
                 if (usarGNH && t.horarios.length && conflita(t.horarios, ocup)) continue;
-                if (trab && !trab.flexivel && t.horarios.length) {
-                    // RESTRIÇÃO MÁXIMA: horário inflexível é COMANDO, não sugestão.
+                if (trab && !trab.varHorario && t.horarios.length) {
+                    // RESTRIÇÃO MÁXIMA: horário fixo (não pode variar início/fim) é COMANDO, não sugestão.
                     // Nenhuma aula pode sobrepor a janela de trabalho [inicio, fim] em qualquer dia,
-                    // incluindo a folga (deslocamento) configurada.
+                    // incluindo a folga (intervalo mínimo trabalho↔aula) configurada — respeitada de igual forma.
                     const wIni = hhmmMin(trab.inicio), wFim = hhmmMin(trab.fim);
                     const gap = Math.max(0, +trab.folga || 0);
                     const violaRestr = t.horarios.some(h => {
@@ -705,17 +719,25 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
                 if (!blk) break;
             }
             if (!chosen) continue;
+            estendeu = true;
             const novoOcup = ocup.concat(chosen.horarios);
             rec(i + 1, sel.concat(chosen), novoOcup);
             if (Date.now() > deadline) return;
+        }
+        // Sem turmas suficientes p/ o mínimo: registra a melhor grade possível com o que há
+        // (seleção maximal que não pode mais crescer). Usada só se nenhuma grade atingir o mínimo.
+        if (!estendeu && sel.length > 0 && sel.length < min) {
+            parciais.push({ sel: sel.map(s => ({ ...s })), score: score(sel) });
         }
     }
     rec(0, [], []);
 
     // dedup por conjunto de códigos, top-5 por score
+    // se nenhuma grade atinge o mínimo, cai p/ as melhores grades parciais (oferta insuficiente)
+    const base = grades.length ? grades : parciais;
     const vistos = new Set(); const unicas = [];
-    grades.sort((a, b) => b.score - a.score);
-    for (const g of grades) {
+    base.sort((a, b) => b.score - a.score);
+    for (const g of base) {
         const key = g.sel.map(s => s.disciplina.codigo).sort().join(',');
         if (vistos.has(key)) continue; vistos.add(key); unicas.push(g);
         if (unicas.length >= 5) break;

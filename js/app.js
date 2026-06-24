@@ -1,7 +1,7 @@
 import K from './engine.js';
 import { AJUDA_IMGS } from './ajuda-imgs.js';
 import {
-    DEFAULT_PREF, S, D, novoEstado, salvar, carregar, PRESETS_KEY, salvarPresets, carregarPresets, hidratarPresets, ORDER, manualBlocos, trabDoSem, trabRespondido, trabFlex, trabCalc, totalBloqueios, TRAB_CFG_KEYS, trabCfgDe, mesmaCfgTrab, salvarPresetTrab, aplicarPresetTrab, excluirPresetTrab, trabRascunhoOuSalvo, trabTemRascunho, trabRascunhoSet, trabAplicarRascunho, trabDescartarRascunho, aplicarTrabSeguintes, derive, turmaDe, tipoDe, rotuloSem, manualNoSem, somaManualAteSem, extrasAteSem, cursadasComManuais, formaturaOK, calcHorasIdx, projetar, reconstruirGrade, blocoExiste, addBloco, rmBloco, limparEscolhasApos, setEstado
+    DEFAULT_PREF, S, D, novoEstado, salvar, carregar, PRESETS_KEY, salvarPresets, carregarPresets, hidratarPresets, ORDER, manualBlocos, trabDoSem, trabRespondido, trabFlex, trabCalc, totalBloqueios, TRAB_CFG_KEYS, trabCfgDe, mesmaCfgTrab, salvarPresetTrab, aplicarPresetTrab, excluirPresetTrab, trabRascunhoOuSalvo, trabTemRascunho, trabRascunhoSet, trabAplicarRascunho, trabDescartarRascunho, aplicarTrabSeguintes, derive, turmaDe, tipoDe, rotuloSem, manualNoSem, somaManualAteSem, extrasAteSem, cursadasComManuais, formaturaOK, calcHorasIdx, projetar, reconstruirGrade, blocoExiste, addBloco, rmBloco, bloqEfetivos, bloqTemRascunho, blocoExisteRasc, addBlocoRasc, rmBlocoRasc, bloqAplicarRascunho, bloqDescartarRascunho, limparEscolhasApos, limparEscolhasDesde, setEstado
 } from './state.js';
 
 /* ===== Compass+ UI ===== */
@@ -205,7 +205,6 @@ function renderPreferencias() {
     <input type="range" min="1" max="10" value="${p.cargaMin}" data-range="cargaMin" style="width:100%">
     <div class="spread" style="margin-top:10px"><span class="muted">Máximo</span><span class="bignum" id="lbl-max">${p.cargaMax}</span></div>
     <input type="range" min="1" max="10" value="${p.cargaMax}" data-range="cargaMax" style="width:100%">
-    <div class="hint">O sistema priorizará a menor quantidade dentro desta faixa.</div>
     </div>
     <div class="card">
     <h3>🧭 Preferência de trilhas (Terceiro Estrato)</h3>
@@ -225,7 +224,7 @@ function renderPreferencias() {
 
 function blockGridHTML(sem) {
     const idx = sem.idx;
-    const man = manualBlocos(idx);
+    const man = bloqEfetivos(idx);   // mostra o rascunho de bloqueios (aplicado só no "Aplicar")
     const auto = (sem.trab && sem.trab.slots) || [];
     const intervalos = (sem.trab && sem.trab.intervalos) || {};
     const autoKey = new Set(auto.map(b => b.diaSemana + b.periodo + b.slot));
@@ -253,13 +252,14 @@ function blockGridHTML(sem) {
 }
 function blocosSemestreHTML(sem) {
     const idx = sem.idx;
-    const temRasc = trabTemRascunho(idx);
+    // pendências = trabalho OU bloqueios manuais com alterações não aplicadas
+    const temRasc = trabTemRascunho(idx) || bloqTemRascunho(idx);
     // w = rascunho se houver mudanças pendentes; caso contrário, o valor salvo
     const w = trabRascunhoOuSalvo(idx);
     // wSalvo = sempre o valor aplicado (para o resumo de grade e indicativo)
     const wSalvo = K.normTrab(trabDoSem(idx));
     const trab = sem.trab || {};
-    const nMan = manualBlocos(idx).length;
+    const nMan = bloqEfetivos(idx).length;   // conta o rascunho de bloqueios (o que está visível na grade)
     const J = K.janelaTrab(w);
     const dn = { 2: 'Seg', 3: 'Ter', 4: 'Qua', 5: 'Qui', 6: 'Sex' };
     const resumo = K.DIAS_UTEIS.map(d => {
@@ -267,22 +267,14 @@ function blocosSemestreHTML(sem) {
         return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
     }).join(' · ');
     const folgaLabel = `<label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${idx}"> min</label>`;
-    // S5.2 — campos conforme flexibilidade
-    const camposFlex = `
-    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>
-    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${idx}"> e no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${idx}"></label>
-    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${idx}"> e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${idx}"></label>
-    ${folgaLabel}
-    <label style="flex-basis:100%">Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
-    <div style="flex-basis:100%;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-    <span class="muted">Dias que prefere flexibilizar:</span>
-    ${K.DIAS_UTEIS.map(d => `<span class="daychip ${w.diasPreferidos.includes(d) ? 'on' : ''}" data-trab-dia="${d}" data-sem="${idx}">${dn[d]}</span>`).join('')}
-    <span class="muted" style="margin-left:6px">— disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${idx}"> dia(s)/sem</span>
-    </div>`;
-    const camposRigido = `
-    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>
-    <label>Começar às <input type="time" value="${w.maxComeco}" data-trab="comeco" data-sem="${idx}"></label>
-    <label>Terminar às <input type="time" value="${w.minFim}" data-trab="termino" data-sem="${idx}"></label>
+    // Campos do trabalho. A janela [início, fim] é definida pelos mesmos campos (comeco/termino);
+    // o que muda com varHorario é o rótulo e o comportamento: fixo trava a grade, flexível se molda.
+    const campoHoras = `<label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>`;
+    const campoJanela = w.varHorario
+        ? `<label>Trabalhar entre <input type="time" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> e <input type="time" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— o trabalho se encaixa ao redor das aulas dentro dessa janela</span></label>`
+        : `<label>Trabalhar das <input type="time" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> às <input type="time" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— janela fixa todos os dias; nenhuma aula pode ocupá-la</span></label>`;
+    const camposTrab = `${campoHoras}
+    ${campoJanela}
     ${folgaLabel}`;
     const presets = S.trabPresets || [];
     const presetsRow = `
@@ -320,18 +312,24 @@ ${aplicarBar}
         <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${idx}">Não</button>
     </span></label>
     ${w.trabalha ? `
-    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🔁 Seus horários são flexíveis?</span>
+    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">⏱️ Você pode variar a quantidade de horas por dia?</span>
     <span class="segbtn">
-        <button class="seg ${w.flexivel ? 'on' : ''}" data-trab-flex-sim="${idx}">Sim</button>
-        <button class="seg ${!w.flexivel ? 'on' : ''}" data-trab-flex-nao="${idx}">Não</button>
+        <button class="seg ${w.varHoras ? 'on' : ''}" data-trab-varhoras="1" data-sem="${idx}">Sim</button>
+        <button class="seg ${!w.varHoras ? 'on' : ''}" data-trab-varhoras="0" data-sem="${idx}">Não</button>
     </span>
-    <span class="muted">${w.flexivel ? `núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})` : 'horário fixo'}</span></label>
+    <span class="muted">${w.varHoras ? 'as horas podem diferir entre os dias' : 'mesma carga horária todos os dias'}</span></label>
+    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🕐 Você pode variar o horário de início e fim entre os dias?</span>
+    <span class="segbtn">
+        <button class="seg ${w.varHorario ? 'on' : ''}" data-trab-varhorario="1" data-sem="${idx}">Sim</button>
+        <button class="seg ${!w.varHorario ? 'on' : ''}" data-trab-varhorario="0" data-sem="${idx}">Não</button>
+    </span>
+    <span class="muted">${w.varHorario ? 'o trabalho se molda ao redor das aulas dentro da janela' : 'horário fixo — trava a grade contra aulas nesse intervalo'}</span></label>
     ${presetsRow}
-    ${w.flexivel ? camposFlex : camposRigido}
-    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${wSalvo.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>` : ''}</div>
+    ${camposTrab}
+    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${wSalvo.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no horário de trabalho</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) não comportam a carga</span>` : ''}</div>
     `: ''}
 </div>
-<div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você tem horários flexíveis.</div>
+<div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você pode variar o horário entre os dias.</div>
 <div style="padding:0 16px 16px">${blockGridHTML(sem)}</div>
 </details>`;
 }
@@ -791,8 +789,7 @@ ${legendaHTML()}`;
 function planoSemestreHTML(sem) {
     const escolhida = sem.grade;
     const banners = [];
-    if (sem.status !== 'confirmado') banners.push(`<div class="banner warn">⚠ Grade estimada — sem dados reais de oferta para ${sem.rotulo}. Baseada nas Turmas Abertas 2026/1; será refinada quando você carregar as Turmas Abertas do semestre. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-upd-gnh="${sem.idx}">Atualizar Turmas Abertas</button></span></div>`);
-    if (sem.inviavel) banners.push(`<div class="banner warn">⚠ Não há disciplinas suficientes na oferta para atingir o mínimo de ${S.preferencias.cargaMin}. Mostrando a melhor grade possível.</div>`);
+    if (sem.status !== 'confirmado') banners.push(`<div class="banner warn">⚠ Grade estimada — sem dados reais de oferta para ${sem.rotulo}. Baseada nas Turmas Abertas 2026/1.</div>`);
     // rascunho banner
     const blocos = sem.bloqueios || [];
     const rasc = escolhida.sel.filter(s => s.bloqueado);
@@ -805,18 +802,18 @@ function planoSemestreHTML(sem) {
     // trabalho: conflito de núcleo / déficit semanal na grade escolhida
     const tw = K.normTrab(trabDoSem(sem.idx)); const tb = sem.trab;
     if (tw.trabalha && (+tw.horas > 0) && tb && escolhida.sel.length) {
-        if (tb.conflitosNucleo > 0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>núcleo obrigatório de trabalho</b> em ${sem.rotulo}. ${tw.flexivel ? 'Mesmo flexível, o núcleo precisa estar livre.' : 'Ative “horários flexíveis” ou ajuste a janela para encaixar.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
-        else if (tb.rigidConf > 0) banners.push(`<div class="banner warn">⚠ ${tb.rigidConf} dia(s) <b>não-flexível(is)</b> têm aula sobre o seu horário preferido em ${sem.rotulo}. Marque esse(s) dia(s) como flexível(is) para o trabalho se ajustar, ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
-        else if (tb.deficit > 1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${tw.horas}h). ${tw.flexivel ? 'O sistema priorizou as grades que mais aproveitam sua flexibilidade.' : 'Considere ligar “horários flexíveis” para variar as horas por dia.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        if (tb.conflitosNucleo > 0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>horário de trabalho obrigatório</b> em ${sem.rotulo}. Esse intervalo é sempre trabalhado — amplie a janela de horário ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        else if (tb.rigidConf > 0) banners.push(`<div class="banner warn">⚠ ${tb.rigidConf} dia(s) não comportam a carga de trabalho por causa das aulas em ${sem.rotulo}. Permita variar as horas por dia (ou o horário entre os dias), ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        else if (tb.deficit > 1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${tw.horas}h). ${tw.varHoras ? 'O sistema priorizou as grades que melhor aproveitam sua disponibilidade.' : 'Permita variar a quantidade de horas por dia para encaixar melhor.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
     }
 
     const editorAberto = S.editor && S.editor.idx === sem.idx;
-    const cards = [...sem.grades.map((g, i) => gradeCardHTML(g, i, sem)), ...(sem.personalizadas || []).map((g, i) => gradeCardHTML(g, 'p' + i, sem, true))];
+    const cards = [...sem.grades.map((g, i) => gradeCardHTML(g, i, sem, false, i === sem.recKey)), ...(sem.personalizadas || []).map((g, i) => gradeCardHTML(g, 'p' + i, sem, true, ('p' + i) === sem.recKey))];
     const montarCard = `<div class="gcard montar" data-montar="${sem.idx}"><div class="gh"><div><div class="gtitle">➕ Montar grade personalizada</div><div class="gsub">crie do zero — ou use “✏️ Editar” numa grade acima</div></div><div class="score" style="font-size:20px">＋</div></div></div>`;
     const temGrades = sem.grades && sem.grades.length;
     const headAcoes = sem.status === 'confirmado'
         ? `<span class="chip" style="color:var(--success)">confirmado ✓</span> <button class="btn btn-sm btn-ghost" data-desconfirmar="${sem.idx}">Refazer</button>`
-        : `<span class="chip">futuro estimado</span>${temGrades ? ` <button class="btn btn-sm btn-primary" data-escolher="0">✓ Confirmar grade sugerida</button>` : ''}`;
+        : `<span class="chip">futuro estimado</span>${temGrades ? ` <button class="btn btn-sm btn-primary" data-escolher="${sem.recKey == null ? 0 : sem.recKey}">✓ Confirmar grade sugerida</button>` : ''}`;
     // cronograma: durante a edição mostra a grade em edição (prévia ao vivo); senão, a grade ativa
     const calSel = editorAberto ? editorSel(sem) : escolhida.sel;
     const calSem = editorAberto ? Object.assign({}, sem, { trab: trabCalc(sem.idx, calSel) }) : sem;
@@ -829,8 +826,7 @@ function planoSemestreHTML(sem) {
 ${banners.join('')}
 ${blocosSemestreHTML(sem)}`;
     if (aguardando) return topo + `
-<div class="banner info" style="margin-top:14px">🕒 Para calcular e exibir o <b>cronograma</b> e as <b>grades possíveis</b> de ${esc(sem.rotulo)}, primeiro responda acima em <b>“Horários travados”</b> se você <b>trabalha neste semestre</b>.
-<span class="b-actions"><button class="btn btn-sm btn-primary" data-abrir-blocos="${sem.idx}">Responder agora</button></span></div>`;
+<div class="banner info" style="margin-top:14px">🕒 Para calcular e exibir o cronograma e as grades possíveis de ${esc(sem.rotulo)}, primeiro responda acima em “Horários travados” se você trabalha neste semestre.</div>`;
     return topo + `
 ${(calSel.length || editorAberto) ? calendarHTML(calSem, calSel, editorAberto) : ''}
 ${(calSel.length || editorAberto) ? legendaHTML() : ''}
@@ -839,12 +835,12 @@ ${editorAberto ? editorHTML(sem) : ''}
 <div class="grades">${(cards.length ? cards.join('') : '<div class="banner info">Nenhuma grade gerada para este semestre.</div>')}${editorAberto ? '' : montarCard}</div>`;
 }
 
-function gradeCardHTML(g, i, sem, custom) {
+function gradeCardHTML(g, i, sem, custom, isRec) {
     const isSel = sem.status === 'confirmado' && sameGrade(g, sem.grade);
-    const rec = i === 0 && !custom;
+    const rec = !!isRec;   // "Recomendada" = a grade de maior score dentro das restrições (definida em projetar)
     const aulas = g.sel.reduce((a, s) => a + (s.disciplina.chSemanal || 0), 0);
     const nblk = g.sel.filter(s => s.bloqueado).length;
-    const open = (typeof i === 'number' && i === 0) || isSel;
+    const open = !!isRec || isSel;
     const escolhida = sem.status === 'confirmado' && sameGrade(g, sem.grade);
     const scoreTip = scoreBreakdownTip(sem, g.sel);   // S9 — detalhamento ao passar o mouse
     return `<div class="gcard ${rec ? 'rec' : ''} ${isSel ? 'sel' : ''} ${open ? 'open' : ''}" data-card="${i}">
@@ -1112,16 +1108,15 @@ async function onClick(e) {
     // Trabalho: Sim/Não e Flex escrevem no rascunho; só "Aplicar" dispara o recálculo
     const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; trabRascunhoSet(i, { trabalha: true }); salvar(); rerenderKeepOpen(); return; }
     const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; trabRascunhoSet(i, { trabalha: false }); salvar(); rerenderKeepOpen(); return; }
-    const tfs = t.closest('[data-trab-flex-sim]'); if (tfs) { const i = +tfs.dataset.trabFlexSim; trabRascunhoSet(i, { flexivel: true }); salvar(); rerenderKeepOpen(); return; }
-    const tfn = t.closest('[data-trab-flex-nao]'); if (tfn) { const i = +tfn.dataset.trabFlexNao; trabRascunhoSet(i, { flexivel: false }); salvar(); rerenderKeepOpen(); return; }
-    // Aplicar rascunho -> copia para S.trabalho e recalcula
-    const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; trabAplicarRascunho(i); limparEscolhasApos(i); toast('Configuração de trabalho aplicada · grades recalculadas'); rerenderKeepOpen(); return; }
-    // Descartar rascunho -> restaura valores salvos no formulário
-    const tdes = t.closest('[data-trab-descartar]'); if (tdes) { const i = +tdes.dataset.trabDescartar; trabDescartarRascunho(i); salvar(); rerenderKeepOpen(); return; }
-    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabAplicarRascunho(i); const n = aplicarTrabSeguintes(i); limparEscolhasApos(i); toast(n ? `Aplicado a este e a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
-    const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; const cur = trabRascunhoOuSalvo(i); const a = cur.diasPreferidos ? cur.diasPreferidos.slice() : []; const p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); trabRascunhoSet(i, { diasPreferidos: a }); salvar(); rerenderKeepOpen(); return; }
+    const tvh = t.closest('[data-trab-varhoras]'); if (tvh) { const i = +tvh.dataset.sem; trabRascunhoSet(i, { varHoras: tvh.dataset.trabVarhoras === '1' }); salvar(); rerenderKeepOpen(); return; }
+    const tvt = t.closest('[data-trab-varhorario]'); if (tvt) { const i = +tvt.dataset.sem; trabRascunhoSet(i, { varHorario: tvt.dataset.trabVarhorario === '1' }); salvar(); rerenderKeepOpen(); return; }
+    // Aplicar rascunho -> copia trabalho E bloqueios manuais para o estado salvo e recalcula
+    const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; const a = trabAplicarRascunho(i); const b = bloqAplicarRascunho(i); if (a || b) limparEscolhasDesde(i); toast('Horários travados aplicados · grades recalculadas'); rerenderKeepOpen(); return; }
+    // Descartar rascunho -> restaura trabalho E bloqueios salvos
+    const tdes = t.closest('[data-trab-descartar]'); if (tdes) { const i = +tdes.dataset.trabDescartar; trabDescartarRascunho(i); bloqDescartarRascunho(i); salvar(); rerenderKeepOpen(); return; }
+    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabAplicarRascunho(i); bloqAplicarRascunho(i); const n = aplicarTrabSeguintes(i); limparEscolhasDesde(i); toast(n ? `Aplicado a este e a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
     const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho "${p.nome}"?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
-    const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); trabDescartarRascunho(i); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
+    const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; const p = (S.trabPresets || []).find(x => x.id === papp.dataset.trabPresetApply); if (p) { trabRascunhoSet(i, Object.assign({}, p.cfg, { trabalha: true })); toast('Configuração carregada no rascunho — clique em Aplicar'); } rerenderKeepOpen(); return; }
     const psav = t.closest('[data-trab-preset-save]'); if (psav) { const i = +psav.dataset.trabPresetSave; const nome = (prompt('Nome desta configuração de trabalho (ex.: "Meio período", "Integral"):', '') || '').trim(); if (nome) { salvarPresetTrab(i, nome); toast('Configuração salva'); } rerenderKeepOpen(); return; }
     // bloqueio por clique tratado no mousedown/mouseup (suporta arrastar)
     if (t.closest('#ir-app')) { if (!S.preferencias.turnos.length) { toast('Selecione ao menos um turno'); return; } S.fase = 'app'; S.abaAtiva = 1; salvar(); render(); return; }
@@ -1187,7 +1182,7 @@ function onChange(e) {
         const i = +tr.dataset.sem, k = tr.dataset.trab;
         const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
         const updates = {};
-        // horário fixo (não flexível): "Começar às" e "Terminar às" definem toda a janela
+        // horário fixo (varHorario=NO): "Trabalhar das X às Y" define toda a janela travada
         if (k === 'comeco') { updates.inicio = updates.maxComeco = updates.desejInicio = tr.value; }
         else if (k === 'termino') { updates.fim = updates.minFim = updates.desejFim = tr.value; }
         else updates[k] = numericos[k] ? (+tr.value || 0) : tr.value;
@@ -1243,16 +1238,16 @@ function onDragEnd() {
     const dr = drag; drag = null;
     $$('.blockgrid .slot.selecting').forEach(el => el.classList.remove('selecting'));
     const lo = Math.min(dr.startOrd, dr.curOrd), hi = Math.max(dr.startOrd, dr.curOrd);
+    // Edita o RASCUNHO de bloqueios — só afeta as grades quando o usuário clicar em "Aplicar".
     if (lo === hi) {                                        // clique simples = alternar
         const [p, s] = ORDER[lo];
-        if (blocoExiste(dr.sem, dr.day, p, s)) rmBloco(dr.sem, dr.day, p, s);
-        else { const nome = prompt('Nome do bloqueio (ex.: Trabalho, Academia):', 'Bloqueio'); if (nome === null) return; addBloco(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
+        if (blocoExisteRasc(dr.sem, dr.day, p, s)) rmBlocoRasc(dr.sem, dr.day, p, s);
+        else { const nome = prompt('Nome do bloqueio (ex.: Trabalho, Academia):', 'Bloqueio'); if (nome === null) return; addBlocoRasc(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
     } else {                                            // arrasto = bloqueia o intervalo
         const nome = prompt('Nome do bloqueio para os horários selecionados:', 'Bloqueio'); if (nome === null) return;
-        for (let o = lo; o <= hi; o++) { const [p, s] = ORDER[o]; addBloco(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
+        for (let o = lo; o <= hi; o++) { const [p, s] = ORDER[o]; addBlocoRasc(dr.sem, dr.day, p, s, nome || 'Bloqueio'); }
     }
-    limparEscolhasApos(dr.sem);   // S2.1 — recalcula semestres seguintes
-    rerenderKeepOpen();
+    rerenderKeepOpen();   // sem recálculo: as grades só mudam no "Aplicar"
 }
 
 // S2.1 — ao mudar algo num semestre, limpa as escolhas dos semestres POSTERIORES
@@ -1303,7 +1298,17 @@ function editorSalvar() {
 }
 function editorLimpar() { const ed = S.editor; if (!ed) return; ed.codigos = []; ed.turmas = {}; ed.subst = null; salvar(); render(); }
 function fecharEditor() { S.editor = null; salvar(); render(); }
-function delCustom(semIdx, i) { if (S.custom[semIdx]) { S.custom[semIdx].splice(i, 1); if (!S.custom[semIdx].length) delete S.custom[semIdx]; } salvar(); render(); }
+function delCustom(semIdx, i) {
+    const arr = S.custom[semIdx]; if (!arr) return;
+    const removida = arr[i];
+    arr.splice(i, 1);
+    if (!arr.length) delete S.custom[semIdx];
+    // Se a grade personalizada excluída estava selecionada, volta a selecionar a recomendada automaticamente.
+    const esc = S.escolhas[semIdx];
+    const eqCods = (a, b) => { a = (a || []).slice().sort(); b = (b || []).slice().sort(); return a.length === b.length && a.every((x, k) => x === b[k]); };
+    if (esc && removida && eqCods(esc.codigos, removida.codigos)) { delete S.escolhas[semIdx]; limparEscolhasApos(semIdx); }
+    salvar(); render();
+}
 function manualAction(btn) {
     const a = btn.dataset.manual, cod = btn.dataset.cod, m = S.manuais;
     const sem = btn.dataset.sem != null ? +btn.dataset.sem : (S.abaAtiva || 0);   // conclui no semestre em exibição
