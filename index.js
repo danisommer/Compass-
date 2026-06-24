@@ -65,6 +65,7 @@
         trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '18:00',
         flexivel: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
     };  // trabalha: null = não respondido | true = Sim | false = Não
+    // trabRascunho is managed externally in S.trabRascunho
     // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
     function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
     function normTrab(w) { const o = Object.assign({}, DEFAULT_TRAB, w || {}); o.diasPreferidos = Array.isArray(o.diasPreferidos) ? o.diasPreferidos.slice() : []; return o; }
@@ -931,6 +932,7 @@ function novoEstado() {
     return {
         fase: 'upload', files: { matriz: null, historico: null, gnh: null }, parsed: { matriz: null, historico: null, gnh: null },
         equivalencias: {}, divergPendentes: [], preferencias: structuredClone(DEFAULT_PREF), bloqueios: {}, trabalho: {}, trabPresets: [],
+        trabRascunho: {},
         escolhas: {}, custom: {}, editor: null, manuais: { estagios: {}, eletiva: { porSem: {} }, extensao: { porSem: {} }, enade: { done: false, sem: null } },
         abaAtiva: 0, sidebarCollapsed: false
     };
@@ -938,7 +940,7 @@ function novoEstado() {
 function salvar() { try { const c = structuredClone(S); delete c.files; delete c.trabPresets; localStorage.setItem('compass_state', JSON.stringify(c)); salvarPresets(); } catch (e) { console.warn(e); } }
 function carregar() {
     try {
-        const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = [];
+        const r = localStorage.getItem('compass_state'); if (!r) return null; const o = JSON.parse(r); o.files = { matriz: null, historico: null, gnh: null }; if (Array.isArray(o.bloqueios)) o.bloqueios = {}; if (!o.trabalho) o.trabalho = {}; if (!Array.isArray(o.trabPresets)) o.trabPresets = []; if (!o.trabRascunho) o.trabRascunho = {};
         for (const k in o.trabalho) { o.trabalho[k] = K.normTrab(o.trabalho[k]); }   // migra estados antigos (campos novos)
         o.trabPresets.forEach(p => { p.cfg = K.normTrab(p.cfg); });
         // migra itens manuais acumulativos (eletiva/extensão) p/ o modelo por-semestre {porSem:{idx:horas}}
@@ -972,6 +974,26 @@ function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return T
 function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabDoSem(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
 function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
 function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
+/* ---- Rascunho do formulário de trabalho (draft state) ---- */
+// Returns the effective work config for DISPLAY purposes: rascunho if pending, else saved
+function trabRascunhoOuSalvo(idx) { return (S.trabRascunho && S.trabRascunho[idx]) ? S.trabRascunho[idx] : K.normTrab(trabDoSem(idx)); }
+// Returns true if there are unsaved draft changes for this semester
+function trabTemRascunho(idx) { return !!(S.trabRascunho && S.trabRascunho[idx]); }
+// Write a field to the draft (does NOT trigger recalc)
+function trabRascunhoSet(idx, updates) {
+    if (!S.trabRascunho) S.trabRascunho = {};
+    const base = S.trabRascunho[idx] ? S.trabRascunho[idx] : K.normTrab(trabDoSem(idx));
+    S.trabRascunho[idx] = Object.assign({}, base, updates);
+}
+// Apply the draft: copy to S.trabalho, clear draft, trigger recalc
+function trabAplicarRascunho(idx) {
+    if (!trabTemRascunho(idx)) return false;
+    S.trabalho[idx] = K.normTrab(S.trabRascunho[idx]);
+    delete S.trabRascunho[idx];
+    return true;
+}
+// Discard draft changes for a semester
+function trabDescartarRascunho(idx) { if (S.trabRascunho) delete S.trabRascunho[idx]; }
 // S3: replica a configuração de horários travados (trabalho + bloqueios manuais) de `idx`
 // para todos os semestres projetados seguintes.
 function aplicarTrabSeguintes(idx) {
@@ -1291,67 +1313,83 @@ function blockGridHTML(sem) {
     return `<div class="cal-wrap"><table class="blockgrid"><thead><tr><th></th>${[2, 3, 4, 5, 6, 7].map(d => `<th>${K.DIAS[d].slice(0, 3)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function blocosSemestreHTML(sem) {
-    const w = K.normTrab(trabDoSem(sem.idx));
+    const idx = sem.idx;
+    const temRasc = trabTemRascunho(idx);
+    // w = rascunho se houver mudanças pendentes; caso contrário, o valor salvo
+    const w = trabRascunhoOuSalvo(idx);
+    // wSalvo = sempre o valor aplicado (para o resumo de grade e indicativo)
+    const wSalvo = K.normTrab(trabDoSem(idx));
     const trab = sem.trab || {};
-    const nMan = manualBlocos(sem.idx).length;
+    const nMan = manualBlocos(idx).length;
     const J = K.janelaTrab(w);
     const dn = { 2: 'Seg', 3: 'Ter', 4: 'Qua', 5: 'Qui', 6: 'Sex' };
     const resumo = K.DIAS_UTEIS.map(d => {
         const iv = trab.intervalos && trab.intervalos[d];
         return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
     }).join(' · ');
-    const folgaLabel = `<label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${sem.idx}"> min</label>`;
+    const folgaLabel = `<label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${idx}"> min</label>`;
     // S5.2 — campos conforme flexibilidade
     const camposFlex = `
-    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
-    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${sem.idx}"> e no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${sem.idx}"></label>
-    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${sem.idx}"> e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${sem.idx}"></label>
+    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>
+    <label>Começar a partir de <input type="time" value="${w.inicio}" data-trab="inicio" data-sem="${idx}"> e no máximo às <input type="time" value="${w.maxComeco}" data-trab="maxComeco" data-sem="${idx}"></label>
+    <label>Terminar no mínimo às <input type="time" value="${w.minFim}" data-trab="minFim" data-sem="${idx}"> e no máximo às <input type="time" value="${w.fim}" data-trab="fim" data-sem="${idx}"></label>
     ${folgaLabel}
-    <label style="flex-basis:100%">Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${sem.idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${sem.idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
+    <label style="flex-basis:100%">Prefiro trabalhar das <input type="time" value="${w.desejInicio}" data-trab="desejInicio" data-sem="${idx}"> às <input type="time" value="${w.desejFim}" data-trab="desejFim" data-sem="${idx}"> <span style="color:#9cc0ff;font-weight:600">= ${K.fmtDur(K.desejHoras(w))}/dia</span></label>
     <div style="flex-basis:100%;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
     <span class="muted">Dias que prefere flexibilizar:</span>
-    ${K.DIAS_UTEIS.map(d => `<span class="daychip ${w.diasPreferidos.includes(d) ? 'on' : ''}" data-trab-dia="${d}" data-sem="${sem.idx}">${dn[d]}</span>`).join('')}
-    <span class="muted" style="margin-left:6px">— disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${sem.idx}"> dia(s)/sem</span>
+    ${K.DIAS_UTEIS.map(d => `<span class="daychip ${w.diasPreferidos.includes(d) ? 'on' : ''}" data-trab-dia="${d}" data-sem="${idx}">${dn[d]}</span>`).join('')}
+    <span class="muted" style="margin-left:6px">— disposto a variar em <input type="number" min="0" max="5" value="${w.diasVariaveis}" data-trab="diasVariaveis" data-sem="${idx}"> dia(s)/sem</span>
     </div>`;
     const camposRigido = `
-    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${sem.idx}"></label>
-    <label>Começar às <input type="time" value="${w.maxComeco}" data-trab="comeco" data-sem="${sem.idx}"></label>
-    <label>Terminar às <input type="time" value="${w.minFim}" data-trab="termino" data-sem="${sem.idx}"></label>
+    <label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>
+    <label>Começar às <input type="time" value="${w.maxComeco}" data-trab="comeco" data-sem="${idx}"></label>
+    <label>Terminar às <input type="time" value="${w.minFim}" data-trab="termino" data-sem="${idx}"></label>
     ${folgaLabel}`;
     const presets = S.trabPresets || [];
     const presetsRow = `
     <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:2px">
     <span class="muted">📁 Configurações salvas:</span>
-    ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${sem.idx}" data-tip="Clique para aplicar “${esc(p.nome)}” a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma ainda</span>'}
-    <button class="btn btn-sm btn-ghost" data-trab-preset-save="${sem.idx}">💾 Salvar atual…</button>
-    <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${sem.idx}" data-tip="Copia este trabalho e os bloqueios manuais para todos os semestres seguintes">📋 Aplicar p/ semestres seguintes</button>
+    ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${idx}" data-tip="Clique para aplicar &quot;${esc(p.nome)}&quot; a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma ainda</span>'}
+    <button class="btn btn-sm btn-ghost" data-trab-preset-save="${idx}">💾 Salvar atual…</button>
+    <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${idx}" data-tip="Copia este trabalho e os bloqueios manuais para todos os semestres seguintes">📋 Aplicar p/ semestres seguintes</button>
     </div>`;
-    const respondido = w.trabalha !== null && w.trabalha !== undefined;   // S5.3: respondeu Sim/Não?
+    // Indicativo uses SAVED state (not draft), so the badge reflects what is actually applied
+    const respondido = wSalvo.trabalha !== null && wSalvo.trabalha !== undefined;
     // S5.3 — total de horas fechado (✓ verde) × não fechado (✗ vermelho)
-    const fechado = !w.trabalha || (trab.deficit <= 1e-6 && !trab.conflitosNucleo && !trab.rigidConf);
-    const indicativo = !respondido
-        ? `<span class="chip" style="color:var(--secondary)">responda →</span>`
-        : fechado
-            ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
-            : `<span class="chip" style="color:var(--error)">✗ preenchido (inválido)</span>`;
-    return `<details class="personalize" id="blocos-${sem.idx}" ${!respondido ? 'open' : ''} style="margin-top:14px">
-<summary>🔒 Horários travados de ${esc(sem.rotulo)} ${indicativo} <span class="muted" style="font-weight:400;font-size:12px">— ${nMan} manual${nMan === 1 ? '' : 'is'}${w.trabalha ? ` + trabalho` : ''}</span></summary>
+    const fechado = !wSalvo.trabalha || (trab.deficit <= 1e-6 && !trab.conflitosNucleo && !trab.rigidConf);
+    const indicativo = temRasc
+        ? `<span class="chip" style="color:#c9a84c;background:rgba(180,130,0,0.15)">⏳ alterações pendentes</span>`
+        : !respondido
+            ? `<span class="chip" style="color:var(--secondary)">responda →</span>`
+            : fechado
+                ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
+                : `<span class="chip" style="color:var(--error)">✗ preenchido (inválido)</span>`;
+    // Aplicar / Descartar bar — shown only when draft is pending
+    const aplicarBar = temRasc ? `
+<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(180,130,0,0.10);border-bottom:1px solid var(--line)">
+    <span style="font-size:13px;color:#c9a84c;flex:1">⚠ Você tem alterações não aplicadas. Clique em <b>Aplicar</b> para recalcular as grades.</span>
+    <button class="btn btn-sm btn-primary" data-trab-aplicar="${idx}">✔ Aplicar</button>
+    <button class="btn btn-sm btn-ghost" data-trab-descartar="${idx}">✕ Descartar</button>
+</div>` : '';
+    return `<details class="personalize" id="blocos-${idx}" ${!respondido ? 'open' : ''} style="margin-top:14px">
+<summary>🔒 Horários travados de ${esc(sem.rotulo)} ${indicativo} <span class="muted" style="font-weight:400;font-size:12px">— ${nMan} manual${nMan === 1 ? '' : 'is'}${wSalvo.trabalha ? ` + trabalho` : ''}</span></summary>
+${aplicarBar}
 <div class="work-form">
     <label style="gap:10px"><span style="color:var(--text);font-weight:600">💼 Você trabalha neste semestre?</span>
     <span class="segbtn">
-        <button class="seg ${w.trabalha === true ? 'on' : ''}" data-trab-sim="${sem.idx}">Sim</button>
-        <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${sem.idx}">Não</button>
+        <button class="seg ${w.trabalha === true ? 'on' : ''}" data-trab-sim="${idx}">Sim</button>
+        <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${idx}">Não</button>
     </span></label>
     ${w.trabalha ? `
     <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🔁 Seus horários são flexíveis?</span>
     <span class="segbtn">
-        <button class="seg ${w.flexivel ? 'on' : ''}" data-trab-flex-sim="${sem.idx}">Sim</button>
-        <button class="seg ${!w.flexivel ? 'on' : ''}" data-trab-flex-nao="${sem.idx}">Não</button>
+        <button class="seg ${w.flexivel ? 'on' : ''}" data-trab-flex-sim="${idx}">Sim</button>
+        <button class="seg ${!w.flexivel ? 'on' : ''}" data-trab-flex-nao="${idx}">Não</button>
     </span>
     <span class="muted">${w.flexivel ? `núcleo obrigatório ${K.fmtDur(J.coreH)}/dia (${K.fmtHHMM(J.maxIni)}–${K.fmtHHMM(J.minFim)})` : 'horário fixo'}</span></label>
     ${presetsRow}
     ${w.flexivel ? camposFlex : camposRigido}
-    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${w.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>` : ''}</div>
+    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${wSalvo.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no núcleo</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) fixo(s) com aula no horário preferido</span>` : ''}</div>
     `: ''}
 </div>
 <div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você tem horários flexíveis.</div>
@@ -2132,14 +2170,19 @@ async function onClick(e) {
     const pr = t.closest('[data-pref]'); if (pr) { S.preferencias.campusUnico = !S.preferencias.campusUnico; salvar(); renderPreferencias(); return; }
     const cs = t.closest('[data-campus]'); if (cs) { S.preferencias.campus = cs.dataset.campus; salvar(); renderPreferencias(); return; }
     const tu = t.closest('[data-turno]'); if (tu) { const k = tu.dataset.turno; const a = S.preferencias.turnos; const i = a.indexOf(k); if (i >= 0) { if (a.length > 1) a.splice(i, 1); } else a.push(k); salvar(); renderPreferencias(); return; }
-    const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = true; limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].trabalha = false; limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const tfs = t.closest('[data-trab-flex-sim]'); if (tfs) { const i = +tfs.dataset.trabFlexSim; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = true; limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const tfn = t.closest('[data-trab-flex-nao]'); if (tfn) { const i = +tfn.dataset.trabFlexNao; S.trabalho[i] = K.normTrab(S.trabalho[i]); S.trabalho[i].flexivel = false; limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; const n = aplicarTrabSeguintes(i); toast(n ? `Aplicado a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
-    const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; S.trabalho[i] = K.normTrab(S.trabalho[i]); const a = S.trabalho[i].diasPreferidos, p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); limparEscolhasApos(i); rerenderKeepOpen(); return; }
-    const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho “${p.nome}”?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
-    const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
+    // Trabalho: Sim/Não e Flex escrevem no rascunho; só "Aplicar" dispara o recálculo
+    const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; trabRascunhoSet(i, { trabalha: true }); salvar(); rerenderKeepOpen(); return; }
+    const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; trabRascunhoSet(i, { trabalha: false }); salvar(); rerenderKeepOpen(); return; }
+    const tfs = t.closest('[data-trab-flex-sim]'); if (tfs) { const i = +tfs.dataset.trabFlexSim; trabRascunhoSet(i, { flexivel: true }); salvar(); rerenderKeepOpen(); return; }
+    const tfn = t.closest('[data-trab-flex-nao]'); if (tfn) { const i = +tfn.dataset.trabFlexNao; trabRascunhoSet(i, { flexivel: false }); salvar(); rerenderKeepOpen(); return; }
+    // Aplicar rascunho -> copia para S.trabalho e recalcula
+    const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; trabAplicarRascunho(i); limparEscolhasApos(i); toast('Configuração de trabalho aplicada · grades recalculadas'); rerenderKeepOpen(); return; }
+    // Descartar rascunho -> restaura valores salvos no formulário
+    const tdes = t.closest('[data-trab-descartar]'); if (tdes) { const i = +tdes.dataset.trabDescartar; trabDescartarRascunho(i); salvar(); rerenderKeepOpen(); return; }
+    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabDescartarRascunho(i); const n = aplicarTrabSeguintes(i); toast(n ? `Aplicado a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
+    const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; const cur = trabRascunhoOuSalvo(i); const a = cur.diasPreferidos ? cur.diasPreferidos.slice() : []; const p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); trabRascunhoSet(i, { diasPreferidos: a }); salvar(); rerenderKeepOpen(); return; }
+    const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho "${p.nome}"?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
+    const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); trabDescartarRascunho(i); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
     const psav = t.closest('[data-trab-preset-save]'); if (psav) { const i = +psav.dataset.trabPresetSave; const nome = (prompt('Nome desta configuração de trabalho (ex.: "Meio período", "Integral"):', '') || '').trim(); if (nome) { salvarPresetTrab(i, nome); toast('Configuração salva'); } rerenderKeepOpen(); return; }
     // bloqueio por clique tratado no mousedown/mouseup (suporta arrastar)
     if (t.closest('#ir-app')) { if (!S.preferencias.turnos.length) { toast('Selecione ao menos um turno'); return; } S.fase = 'app'; S.abaAtiva = 1; salvar(); render(); return; }
@@ -2201,13 +2244,16 @@ function onChange(e) {
     }
     const tr = e.target.closest('[data-trab]');
     if (tr) {
-        const i = +tr.dataset.sem, k = tr.dataset.trab; S.trabalho[i] = K.normTrab(S.trabalho[i]);
+        // Writes to rascunho only — no recalc until user clicks Aplicar
+        const i = +tr.dataset.sem, k = tr.dataset.trab;
         const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
+        const updates = {};
         // horário fixo (não flexível): "Começar às" e "Terminar às" definem toda a janela
-        if (k === 'comeco') { const wt = S.trabalho[i]; wt.inicio = wt.maxComeco = wt.desejInicio = tr.value; }
-        else if (k === 'termino') { const wt = S.trabalho[i]; wt.fim = wt.minFim = wt.desejFim = tr.value; }
-        else S.trabalho[i][k] = numericos[k] ? (+tr.value || 0) : tr.value;
-        limparEscolhasApos(i); rerenderKeepOpen(); return;
+        if (k === 'comeco') { updates.inicio = updates.maxComeco = updates.desejInicio = tr.value; }
+        else if (k === 'termino') { updates.fim = updates.minFim = updates.desejFim = tr.value; }
+        else updates[k] = numericos[k] ? (+tr.value || 0) : tr.value;
+        trabRascunhoSet(i, updates);
+        salvar(); rerenderKeepOpen(); return;
     }
 }
 
