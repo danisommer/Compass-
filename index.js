@@ -971,12 +971,12 @@ function totalBloqueios() { let n = 0; for (const i in (S.bloqueios || {})) n +=
 const TRAB_CFG_KEYS = ['horas', 'inicio', 'maxComeco', 'minFim', 'fim', 'flexivel', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos', 'folga'];
 function trabCfgDe(w) { const n = K.normTrab(w); const o = {}; TRAB_CFG_KEYS.forEach(k => o[k] = k === 'diasPreferidos' ? n[k].slice().sort() : n[k]); return o; }
 function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return TRAB_CFG_KEYS.every(k => k === 'diasPreferidos' ? (x[k].join(',') === y[k].join(',')) : (x[k] === y[k])); }
-function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabDoSem(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
+function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabRascunhoOuSalvo(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
 function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
 function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
 /* ---- Rascunho do formulário de trabalho (draft state) ---- */
 // Returns the effective work config for DISPLAY purposes: rascunho if pending, else saved
-function trabRascunhoOuSalvo(idx) { return (S.trabRascunho && S.trabRascunho[idx]) ? S.trabRascunho[idx] : K.normTrab(trabDoSem(idx)); }
+function trabRascunhoOuSalvo(idx) { return K.normTrab((S.trabRascunho && S.trabRascunho[idx]) ? S.trabRascunho[idx] : trabDoSem(idx)); }
 // Returns true if there are unsaved draft changes for this semester
 function trabTemRascunho(idx) { return !!(S.trabRascunho && S.trabRascunho[idx]); }
 // Write a field to the draft (does NOT trigger recalc)
@@ -2179,7 +2179,7 @@ async function onClick(e) {
     const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; trabAplicarRascunho(i); limparEscolhasApos(i); toast('Configuração de trabalho aplicada · grades recalculadas'); rerenderKeepOpen(); return; }
     // Descartar rascunho -> restaura valores salvos no formulário
     const tdes = t.closest('[data-trab-descartar]'); if (tdes) { const i = +tdes.dataset.trabDescartar; trabDescartarRascunho(i); salvar(); rerenderKeepOpen(); return; }
-    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabDescartarRascunho(i); const n = aplicarTrabSeguintes(i); toast(n ? `Aplicado a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
+    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabAplicarRascunho(i); const n = aplicarTrabSeguintes(i); limparEscolhasApos(i); toast(n ? `Aplicado a este e a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
     const td = t.closest('[data-trab-dia]'); if (td) { const i = +td.dataset.sem, dia = +td.dataset.trabDia; const cur = trabRascunhoOuSalvo(i); const a = cur.diasPreferidos ? cur.diasPreferidos.slice() : []; const p = a.indexOf(dia); if (p >= 0) a.splice(p, 1); else a.push(dia); trabRascunhoSet(i, { diasPreferidos: a }); salvar(); rerenderKeepOpen(); return; }
     const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho "${p.nome}"?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
     const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; aplicarPresetTrab(i, papp.dataset.trabPresetApply); trabDescartarRascunho(i); limparEscolhasApos(i); toast('Configuração aplicada'); rerenderKeepOpen(); return; }
