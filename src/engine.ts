@@ -2,10 +2,10 @@
     Compass+ — Motor de cálculos e planejamento (puro, sem DOM; testável em Node).
     Grafo de dependências, geração de grades, alocação de trabalho e cálculo de
     horas faltantes. Consome as estruturas produzidas pelo parser de PDFs
-    (`parser.js`). Módulo ES: exporta `default` o objeto API (importado como `K`
+    (`parser.ts`). Módulo ES: exporta `default` o objeto API (importado como `K`
     nos demais módulos), reunindo parsing + cálculos numa única superfície.
     =================================================================== */
-import Parser, { TRILHA_SUBAREAS, REQUISITOS } from './parser.js';
+import Parser, { TRILHA_SUBAREAS, REQUISITOS } from './parser';
 
 /* ---------- Constantes de horário (Apêndice A) ---------- */
 const SLOTS = {
@@ -31,13 +31,12 @@ const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} 
 for (const [p, s] of ORDEM_SLOTS) { const a = SLOTS[p][s]; SLOT_MIN[p + s] = { ini: hhmmMin(a[0]), fim: hhmmMin(a[1]) }; }
 const DEFAULT_TRAB = {
     trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '18:00',
-    // Dois eixos de flexibilidade (antes um único `flexivel`):
+    // Dois eixos de flexibilidade:
     //  varHoras  = pode variar a quantidade de horas por dia (distribuição desigual).
     //  varHorario = pode variar o horário de início/fim entre os dias (trabalho se encaixa ao redor das
     //               aulas). Quando FALSE, o horário é FIXO e TRAVA a grade: nenhuma aula pode ocupá-lo.
     varHoras: false, varHorario: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
 };  // trabalha: null = não respondido | true = Sim | false = Não
-// trabRascunho is managed externally in S.trabRascunho
 // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
 function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
 function normTrab(w) {
@@ -88,7 +87,7 @@ function capacidadeDia(w, slotsAula) {
 
 // análise de UM dia: span livre + encaixe do horário preferido
 function analiseDia(w, slotsAula) {
-    const c = capacidadeDia(w, slotsAula);                     // {coreLivre, capH, left, right}
+    const c = capacidadeDia(w, slotsAula);
     const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim);
     const pStart = Math.max(dIni, c.left), pEnd = Math.min(dFim, c.right);
     const prefFitH = Math.max(0, (pEnd - pStart) / 60);             // horas do preferido que ficam livres
@@ -137,7 +136,7 @@ function alocarTrab(w, infoPorDia) {
         return { horasPorDia, deficit, rigidConf, conflitosNucleo };
     }
 
-    // Horas variáveis: TODOS os dias podem variar (a seleção de dias específicos foi removida).
+    // Horas variáveis: TODOS os dias podem variar.
     // Cada dia começa no máximo que cabe livre (recortado pelas aulas) e depois ajusta p/ fechar o total.
     const piso = d => Math.min(J.coreH, capH(d));               // mínimo do dia (núcleo)
     let rigidConf = 0;
@@ -304,7 +303,7 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
     const min = pref.cargaMin, max = pref.cargaMax;
     // Pool de busca (mantém a ordem de prioridade): top-18 optativas + TODAS as obrigatórias
     // disponíveis, mesmo as de período futuro que a prioridade rebaixa (cada obrigatória pesa muito
-    // no score). Antes truncávamos em 14 por prioridade e perdíamos obrigatórias mal ranqueadas.
+    // no score).
     const pool = candOrdenadas.filter((c, i) => i < 18 || !c.disciplina.isOpcional);
     const grades = [];          // grades que atingem o mínimo de disciplinas
     const parciais = [];        // melhores grades possíveis ABAIXO do mínimo (fallback p/ oferta insuficiente)
@@ -445,12 +444,12 @@ function calcularHoras(matriz, cursadasSet, extras) {
     const c1159 = porConjunto['1159']?.cursada || 0;
     const c1161 = porConjunto['1161']?.cursada || 0;
     // trilhas: validação parcial (3 subáreas) — soma simples de CH cursada em subáreas
-    let trilhaCursada = 0; const subStatus = {};
+    let trilhaCursada = 0; const subStatus: any = {};
     Object.keys(TRILHA_SUBAREAS).forEach(id => {
         const ch = porConjunto[id]?.cursada || 0; trilhaCursada += ch;
         subStatus[id] = { nome: TRILHA_SUBAREAS[id], cursada: ch, validada: ch >= REQUISITOS.trilhaMin, faltante: Math.max(0, REQUISITOS.trilhaMin - ch) };
     });
-    const validadas = Object.values(subStatus).filter(s => s.validada).length;
+    const validadas = Object.values(subStatus).filter((s: any) => s.validada).length;
 
     // extensão: ICSX20(60 obrig) + optativas aprovadas com chExt
     let extCursada = 0;
@@ -478,7 +477,7 @@ function calcularHoras(matriz, cursadasSet, extras) {
 
 /* ---------- exports ----------
     API combinada (parsing + cálculos) preservada para compat: importada como `K`.
-    O parsing vive em `parser.js` e é reexposto aqui via spread de `Parser`. */
+    O parsing vive em `parser.ts` e é reexposto aqui via spread de `Parser`. */
 const API = {
     ...Parser,
     construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos, pontuarSel, pontuarSelDetalhe,

@@ -1,0 +1,22 @@
+{
+  "name": "compass-plus",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Compass+ — Planejamento Acadêmico UTFPR",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38",
+    "sortablejs": "^1.15.6"
+  },
+  "devDependencies": {
+    "@types/sortablejs": "^1.15.8",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

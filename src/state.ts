@@ -1,9 +1,9 @@
-import K from './engine.js';
+import K from './engine';
 
 /* ---------- Estado ---------- */
 const DEFAULT_PREF = { campusUnico: false, campus: 'CURITIBA', turnos: ['M', 'T', 'N'], cargaMin: 4, cargaMax: 7, preferenciaTrilhas: [], eletivaManual: 0 };
-let S = null;          // estado persistido
-let D = {};            // derivado (não persistido)
+let S: any = null;          // estado persistido
+let D: any = {};            // derivado (não persistido)
 
 function novoEstado() {
     return {
@@ -53,25 +53,20 @@ function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return T
 function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabRascunhoOuSalvo(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
 function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
 function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
-/* ---- Rascunho do formulário de trabalho (draft state) ---- */
-// Returns the effective work config for DISPLAY purposes: rascunho if pending, else saved
+/* ---- Rascunho do formulário de trabalho ---- */
 function trabRascunhoOuSalvo(idx) { return K.normTrab((S.trabRascunho && S.trabRascunho[idx]) ? S.trabRascunho[idx] : trabDoSem(idx)); }
-// Returns true if there are unsaved draft changes for this semester
 function trabTemRascunho(idx) { return !!(S.trabRascunho && S.trabRascunho[idx]); }
-// Write a field to the draft (does NOT trigger recalc)
 function trabRascunhoSet(idx, updates) {
     if (!S.trabRascunho) S.trabRascunho = {};
     const base = S.trabRascunho[idx] ? S.trabRascunho[idx] : K.normTrab(trabDoSem(idx));
     S.trabRascunho[idx] = Object.assign({}, base, updates);
 }
-// Apply the draft: copy to S.trabalho, clear draft, trigger recalc
 function trabAplicarRascunho(idx) {
     if (!trabTemRascunho(idx)) return false;
     S.trabalho[idx] = K.normTrab(S.trabRascunho[idx]);
     delete S.trabRascunho[idx];
     return true;
 }
-// Discard draft changes for a semester
 function trabDescartarRascunho(idx) { if (S.trabRascunho) delete S.trabRascunho[idx]; }
 // S3: replica a configuração de horários travados (trabalho + bloqueios manuais) de `idx`
 // para todos os semestres projetados seguintes.
@@ -123,11 +118,9 @@ function tipoDe(d) {
 }
 
 /* ---------- Projeção dos semestres ---------- */
-function rotuloSem(idx) { // idx 0 = 2026/1
-    let ano = 2026 + Math.floor((idx + 0) / 2);
-    let per = (idx % 2) + 1;
-    // idx0 ->2026/1, idx1->2026/2, idx2->2027/1 ...
-    ano = 2026 + Math.floor(idx / 2); per = (idx % 2) + 1;
+function rotuloSem(idx) { // idx 0 = 2026/1, idx 1 = 2026/2, idx 2 = 2027/1 ...
+    const ano = 2026 + Math.floor(idx / 2);
+    const per = (idx % 2) + 1;
     return `${ano}/${per}`;
 }
 function manualNoSem(idx) {

@@ -2,3 +2,6 @@
 Requirements.md
 alteracoes.md
 .vscode
+node_modules/
+dist/
+*.local

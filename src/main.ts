@@ -1,16 +1,19 @@
-import K from './engine.js';
-import { AJUDA_IMGS } from './ajuda-imgs.js';
+import K from './engine';
+import { AJUDA_IMGS } from './ajuda-imgs';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import Sortable from 'sortablejs';
+import './styles.css';
 import {
     DEFAULT_PREF, S, D, novoEstado, salvar, carregar, PRESETS_KEY, salvarPresets, carregarPresets, hidratarPresets, ORDER, manualBlocos, trabDoSem, trabRespondido, trabFlex, trabCalc, totalBloqueios, TRAB_CFG_KEYS, trabCfgDe, mesmaCfgTrab, salvarPresetTrab, aplicarPresetTrab, excluirPresetTrab, trabRascunhoOuSalvo, trabTemRascunho, trabRascunhoSet, trabAplicarRascunho, trabDescartarRascunho, aplicarTrabSeguintes, derive, turmaDe, tipoDe, rotuloSem, manualNoSem, somaManualAteSem, extrasAteSem, cursadasComManuais, formaturaOK, calcHorasIdx, projetar, reconstruirGrade, blocoExiste, addBloco, rmBloco, bloqEfetivos, bloqTemRascunho, blocoExisteRasc, addBlocoRasc, rmBlocoRasc, bloqAplicarRascunho, bloqDescartarRascunho, limparEscolhasApos, limparEscolhasDesde, setEstado
-} from './state.js';
+} from './state';
 
-/* ===== Compass+ UI ===== */
 /* ===================================================================
-    Compass+ — Interface (depende de window.Compass)
+    Compass+ — Interface
     =================================================================== */
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const $ = (s: string, r: Document | Element = document): any => r.querySelector(s);
+const $$ = (s: string, r: Document | Element = document): any[] => [...r.querySelectorAll(s)];
 const root = $('#root');
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // S8 — explicação geral do score (tooltip da barra superior e dos cabeçalhos de grade)
@@ -72,15 +75,15 @@ function abrirAjuda() {
         <p class="muted" style="font-size:11px">Tutorial referente ao Portal do Aluno da UTFPR — Campus Curitiba.</p>
         </div>
     </aside>`;
-    ov.addEventListener('click', e => { if (e.target.closest('[data-fechar-ajuda]')) fecharAjuda(); });
+    ov.addEventListener('click', e => { if ((e.target as HTMLElement).closest('[data-fechar-ajuda]')) fecharAjuda(); });
     document.body.appendChild(ov);
     requestAnimationFrame(() => ov.classList.add('on'));
 }
 function fecharAjuda() { const ov = document.getElementById('ajuda-ov'); if (ov) { ov.classList.remove('on'); setTimeout(() => ov.remove(), 260); } }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharAjuda(); });
 
-/* ---------- Extração via PDF.js (espelha o dump de teste) ---------- */
-async function extrairPaginas(file, onProg) {
+/* ---------- Extração via PDF.js ---------- */
+async function extrairPaginas(file, onProg?) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
     const pages = [];
@@ -89,7 +92,7 @@ async function extrairPaginas(file, onProg) {
         const vp = page.getViewport({ scale: 1 });
         const tc = await page.getTextContent();
         const items = [];
-        for (const it of tc.items) {
+        for (const it of tc.items as any[]) {
             const str = it.str; if (!str || !str.trim()) continue;
             const x = it.transform[4], f = it.transform[5];
             const h = it.height || 9, w = it.width || str.length * 5;
@@ -228,7 +231,7 @@ function blockGridHTML(sem) {
     const auto = (sem.trab && sem.trab.slots) || [];
     const intervalos = (sem.trab && sem.trab.intervalos) || {};
     const autoKey = new Set(auto.map(b => b.diaSemana + b.periodo + b.slot));
-    const periods = [['M', 6], ['T', 6], ['N', 5]];
+    const periods: [string, number][] = [['M', 6], ['T', 6], ['N', 5]];
     let rows = '';
     periods.forEach(([per, n], pi) => {
         for (let s = 1; s <= n; s++) {
@@ -284,7 +287,6 @@ function blocosSemestreHTML(sem) {
     <button class="btn btn-sm btn-ghost" data-trab-preset-save="${idx}">💾 Salvar atual…</button>
     <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${idx}" data-tip="Copia este trabalho e os bloqueios manuais para todos os semestres seguintes">📋 Aplicar p/ semestres seguintes</button>
     </div>`;
-    // Indicativo uses SAVED state (not draft), so the badge reflects what is actually applied
     const respondido = wSalvo.trabalha !== null && wSalvo.trabalha !== undefined;
     // S5.3 — total de horas fechado (✓ verde) × não fechado (✗ vermelho)
     const fechado = !wSalvo.trabalha || (trab.deficit <= 1e-6 && !trab.conflitosNucleo && !trab.rigidConf);
@@ -295,7 +297,6 @@ function blocosSemestreHTML(sem) {
             : fechado
                 ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
                 : `<span class="chip" style="color:var(--error)">✗ preenchido (inválido)</span>`;
-    // Aplicar / Descartar bar — shown only when draft is pending
     const aplicarBar = temRasc ? `
 <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(180,130,0,0.10);border-bottom:1px solid var(--line)">
     <span style="font-size:13px;color:#c9a84c;flex:1">⚠ Você tem alterações não aplicadas. Clique em <b>Aplicar</b> para recalcular as grades.</span>
@@ -335,7 +336,7 @@ ${aplicarBar}
 }
 
 function initTrilhasDrag() {
-    const ul = $('#trilhas'); if (!ul || !window.Sortable) return;
+    const ul = $('#trilhas'); if (!ul) return;
     Sortable.create(ul, {
         animation: 150, handle: '.grip', ghostClass: 'sortable-ghost',
         onEnd() {
@@ -396,7 +397,7 @@ function layoutForca(g, W, H, iters) {
     const k = Math.sqrt((W * H) / n) * 0.8;
     g.nodes.forEach((nd, i) => { const p = nd.per > 0 ? nd.per : 4; nd.x = (p / 9) * W + (Math.random() * 80 - 40); nd.y = (H * 0.08) + (i * 131 % Math.max(1, H - 100)) + (Math.random() * 40 - 20); });
     const adj = g.edges.map(e => [g.byCod.get(e.from), g.byCod.get(e.to)]).filter(a => a[0] && a[1]);
-    const deg = new Map(g.nodes.map(nd => [nd.cod, 0]));
+    const deg = new Map<any, number>(g.nodes.map(nd => [nd.cod, 0]));
     for (const [a, b] of adj) { deg.set(a.cod, (deg.get(a.cod) || 0) + 1); deg.set(b.cod, (deg.get(b.cod) || 0) + 1); }
     g.nodes.forEach(nd => nd._iso = (deg.get(nd.cod) || 0) === 0);
     const sim = g.nodes.filter(nd => !nd._iso);   // só os conectados na simulação de forças
@@ -471,7 +472,7 @@ function placeIsolated(g, k) {
         const hosts = con.filter(n => n.tipo === tipo);
         if (hosts.length) {
             // encosta cada isolado num nó conectado da mesma categoria (em leque p/ fora do centro)
-            const buckets = new Map(hosts.map(h => [h, []]));
+            const buckets = new Map<any, any[]>(hosts.map(h => [h, []]));
             group.forEach((nd, i) => buckets.get(hosts[i % hosts.length]).push(nd));
             buckets.forEach((list, h) => {
                 const m = list.length; if (!m) return;
@@ -559,7 +560,7 @@ function selecionarNoGrafo(cod) {
     if (!GRAFO) return;
     GRAFO.sel = cod || null;
     const svg = document.getElementById('grafo-svg'); if (!svg) return;
-    const nodes = svg.querySelectorAll('.gn'), edges = svg.querySelectorAll('.ge');
+    const nodes: any = svg.querySelectorAll('.gn'), edges: any = svg.querySelectorAll('.ge');
     if (!cod) { nodes.forEach(n => n.classList.remove('dim', 'hot', 'sel')); edges.forEach(e => e.classList.remove('dim', 'hot')); pintarPainelGrafo(null); return; }
     const anc = cadeiaGrafo(cod, 'in'), desc = cadeiaGrafo(cod, 'out'), rel = new Set([cod, ...anc, ...desc]);
     nodes.forEach(n => { const c = n.dataset.grafoNode; n.classList.toggle('sel', c === cod); n.classList.toggle('hot', rel.has(c) && c !== cod); n.classList.toggle('dim', !rel.has(c)); });
@@ -583,7 +584,7 @@ let _grafoMove = null, _grafoUp = null;
 function wireGrafo() {
     const svg = document.getElementById('grafo-svg'); if (!svg) return;
     let panning = false, sx = 0, sy = 0, ox = 0, oy = 0;
-    svg.addEventListener('mousedown', e => { if (e.target.closest('.gn')) return; panning = true; sx = e.clientX; sy = e.clientY; ox = GRAFO.view.x; oy = GRAFO.view.y; svg.classList.add('panning'); });
+    svg.addEventListener('mousedown', e => { if ((e.target as HTMLElement).closest('.gn')) return; panning = true; sx = e.clientX; sy = e.clientY; ox = GRAFO.view.x; oy = GRAFO.view.y; svg.classList.add('panning'); });
     const move = e => { if (!panning) return; GRAFO.view.x = ox + (e.clientX - sx); GRAFO.view.y = oy + (e.clientY - sy); grafoApplyView(); };
     const up = () => { if (panning) { panning = false; svg.classList.remove('panning'); } };
     if (_grafoMove) window.removeEventListener('mousemove', _grafoMove);
@@ -860,7 +861,7 @@ function gradeCardHTML(g, i, sem, custom, isRec) {
 }
 function sameGrade(a, b) { if (!a || !b) return false; const ka = a.sel.map(s => s.disciplina.codigo).sort().join(','); const kb = b.sel.map(s => s.disciplina.codigo).sort().join(','); return ka === kb && ka.length > 0; }
 
-function discRowHTML(s, sem) {
+function discRowHTML(s, sem?) {
     const d = s.disciplina; const tp = tipoDe(d);
     const tag = tp === 'OBR' ? 'OBR' : tp === 'HUM' ? 'HUM' : tp === 'TRI' ? 'TRI' : tp === 'OPT' ? 'OPT' : 'ELE';
     const turno = s.horarios.length ? [...new Set(s.horarios.map(h => h.periodo))].join('') : '—';
@@ -883,7 +884,7 @@ ${d.chExt > 0 ? '<span class="ext-dot" title="Extensionista"></span>' : ''}
 }
 
 /* ---------- Cronograma semanal ---------- */
-function calendarHTML(sem, sel, editando) {
+function calendarHTML(sem, sel, editando?) {
     const grid = {};
     const blocos = sem.bloqueios || [];
     const put = (h, data) => { grid[h.diaSemana + '-' + h.periodo + '-' + h.slot] = data; };
@@ -909,7 +910,7 @@ function calendarHTML(sem, sel, editando) {
         if (grid[key]) continue;
         grid[key] = { tipo: 'trab', iv: ivAll[b.diaSemana] };
     }
-    const periods = [['M', 6], ['T', 6], ['N', 5]];
+    const periods: [string, number][] = [['M', 6], ['T', 6], ['N', 5]];
     let rows = '';
     periods.forEach(([per, n], pi) => {
         for (let s = 1; s <= n; s++) {
@@ -941,7 +942,6 @@ function legendaHTML() {
 <span><i style="box-shadow:inset 0 0 0 2px var(--ext);background:transparent"></i>Extensionista</span></div>`;
 }
 
-/* ---------- Personalização ---------- */
 /* ---------- Editor de grade (Personalizar / Editar qualquer grade) ---------- */
 function turmasDe(cod, sem) { const c = (sem.candidatas || []).find(x => x.disciplina.codigo === cod); return c ? c.turmas : []; }
 // seleção atual do editor no formato do cronograma (para a prévia ao vivo)
@@ -1152,7 +1152,7 @@ async function onClick(e) {
     const dcu = t.closest('[data-del-custom]'); if (dcu) return delCustom(+dcu.dataset.sem, +dcu.dataset.delCustom);
     const upd = t.closest('[data-upd-gnh]'); if (upd) return atualizarGNH(+upd.dataset.updGnh);
     const dc = t.closest('[data-desconfirmar]'); if (dc) { delete S.escolhas[+dc.dataset.desconfirmar]; salvar(); render(); return; }
-    const ab = t.closest('[data-abrir-blocos]'); if (ab) { const el = document.getElementById('blocos-' + ab.dataset.abrirBlocos); if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } return; }
+    const ab = t.closest('[data-abrir-blocos]'); if (ab) { const el = document.getElementById('blocos-' + ab.dataset.abrirBlocos) as HTMLDetailsElement | null; if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } return; }
 
     // manuais
     const mn = t.closest('[data-manual]'); if (mn) return manualAction(mn);
@@ -1178,10 +1178,9 @@ function onChange(e) {
     }
     const tr = e.target.closest('[data-trab]');
     if (tr) {
-        // Writes to rascunho only — no recalc until user clicks Aplicar
         const i = +tr.dataset.sem, k = tr.dataset.trab;
         const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
-        const updates = {};
+        const updates: any = {};
         // horário fixo (varHorario=NO): "Trabalhar das X às Y" define toda a janela travada
         if (k === 'comeco') { updates.inicio = updates.maxComeco = updates.desejInicio = tr.value; }
         else if (k === 'termino') { updates.fim = updates.minFim = updates.desejFim = tr.value; }
@@ -1208,7 +1207,7 @@ function onTipMove(e) {
 /* ---------- Ações ---------- */
 function rerenderKeepOpen() {
     salvar();
-    if (S.fase === 'app') { const open = new Set($$('details.personalize[open]').map(e => e.id)); render(); open.forEach(id => { const e = document.getElementById(id); if (e) e.open = true; }); }
+    if (S.fase === 'app') { const open = new Set($$('details.personalize[open]').map(e => e.id)); render(); open.forEach(id => { const e = document.getElementById(id) as HTMLDetailsElement | null; if (e) e.open = true; }); }
     else render();
 }
 
@@ -1369,15 +1368,15 @@ function toast(msg) { const t = document.createElement('div'); t.className = 'to
 
 /* ---------- Upload handlers (file inputs) ---------- */
 document.addEventListener('change', e => {
-    const inp = e.target.closest('[data-input]'); if (!inp) return;
+    const inp = (e.target as HTMLElement).closest('[data-input]') as HTMLInputElement | null; if (!inp) return;
     const k = inp.dataset.input; const file = inp.files[0]; if (!file) return;
     if (!/pdf/i.test(file.type) && !/\.pdf$/i.test(file.name)) { alert('Selecione um arquivo PDF.'); return; }
     S.files[k] = file; renderUpload();
 });
-document.addEventListener('dragover', e => { const dz = e.target.closest('.dz'); if (dz) { e.preventDefault(); dz.classList.add('drag'); } });
-document.addEventListener('dragleave', e => { const dz = e.target.closest('.dz'); if (dz) dz.classList.remove('drag'); });
+document.addEventListener('dragover', e => { const dz = (e.target as HTMLElement).closest('.dz'); if (dz) { e.preventDefault(); dz.classList.add('drag'); } });
+document.addEventListener('dragleave', e => { const dz = (e.target as HTMLElement).closest('.dz'); if (dz) dz.classList.remove('drag'); });
 document.addEventListener('drop', e => {
-    const dz = e.target.closest('.dz'); if (!dz) return; e.preventDefault(); dz.classList.remove('drag');
+    const dz = (e.target as HTMLElement).closest('.dz') as HTMLElement | null; if (!dz) return; e.preventDefault(); dz.classList.remove('drag');
     const k = dz.dataset.dz; const file = e.dataTransfer.files[0]; if (!file) return;
     if (!/pdf/i.test(file.type) && !/\.pdf$/i.test(file.name)) { alert('Solte um arquivo PDF.'); return; }
     S.files[k] = file; renderUpload();

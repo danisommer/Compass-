@@ -2,7 +2,7 @@
     Compass+ — Fetching/parsing dos PDFs (puro, sem DOM; testável em Node).
     Lê os PDFs do aluno (Matriz Curricular, Histórico Escolar, Turmas Abertas)
     e os transforma nas estruturas de dados consumidas pelo motor de cálculos
-    (`engine.js`). Módulo ES: exporta as funções nomeadas + um objeto `default`
+    (`engine.ts`). Módulo ES: exporta as funções nomeadas + um objeto `default`
     com a API de parsing.
     =================================================================== */
 
@@ -68,7 +68,7 @@ function tituloCase(s) {
     pages: [{ h, items:[{str,x,yTop,w,h}] }]   (yTop cresce p/ baixo)
     -> retorna [ [ {t,x} ... ]  (linha)  ... ] achatado de todas as páginas
     =================================================================== */
-function reconstruirLinhas(pages, xMax) {
+function reconstruirLinhas(pages, xMax?) {
     const linhas = [];
     for (const pg of pages) {
         const its = pg.items.filter(it => it.str && it.str.trim() !== '' && (xMax == null || it.x < xMax));
@@ -363,7 +363,7 @@ function parseTurmasAbertas(pages) {
 function detectarEquivalencias(matriz, gnh) {
     const mCods = new Set(matriz.disciplinas.map(d => d.codigo));
     const auto = {}; const divergencias = [];
-    const gnhCods = [...new Set(gnh.map(t => t.codigo))];
+    const gnhCods: any[] = [...new Set(gnh.map(t => t.codigo))];
     for (const gc of gnhCods) {
         if (mCods.has(gc)) continue;
         if (mCods.has('I' + gc)) { auto[gc] = 'I' + gc; continue; }   // CSX41 -> ICSX41

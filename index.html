@@ -10,15 +10,13 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
     rel="stylesheet" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
-  <link rel="stylesheet" href="styles.css">
 </head>
 
 <body>
   <div id="root"></div>
-  <!-- App em ES modules: engine.js (núcleo) ← state.js (dados) ← app.js (UI). Requer servir via servidor. -->
-  <script type="module" src="js/app.js"></script>
+  <!-- App em ES modules (Vite): engine.ts (núcleo) ← state.ts (dados) ← main.ts (UI).
+       pdf.js, Sortable e o CSS agora são importados pelos próprios módulos. -->
+  <script type="module" src="/src/main.ts"></script>
 </body>
 
 </html>
