@@ -731,6 +731,88 @@ input[type=range]::-webkit-slider-thumb {
     color: #9cc0ff
 }
 
+/* opções de lado flexível (rádios mutuamente exclusivos) */
+.flexlado {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-left: 2px
+}
+
+.flexlado-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: .12s
+}
+
+.flexlado-opt:hover {
+    border-color: var(--primary)
+}
+
+.flexlado-opt .rb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--muted);
+    flex: none;
+    position: relative;
+    transition: .12s
+}
+
+.flexlado-opt.on {
+    border-color: var(--primary);
+    color: var(--text);
+    background: rgba(79, 142, 247, .12)
+}
+
+.flexlado-opt.on .rb {
+    border-color: var(--primary)
+}
+
+.flexlado-opt.on .rb::after {
+    content: '';
+    position: absolute;
+    inset: 2px;
+    border-radius: 50%;
+    background: var(--primary)
+}
+
+/* barra de ações do painel de horários travados */
+.trab-acoes {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 16px 14px;
+    border-top: 1px solid var(--line)
+}
+
+.trab-acoes-l {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 1;
+    min-width: 0
+}
+
+.trab-acoes-r {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none
+}
+
 .segbtn {
     display: inline-flex;
     border: 1px solid var(--line);
@@ -983,6 +1065,24 @@ input[type=range]::-webkit-slider-thumb {
 .tab.formatura {
     border-color: var(--success);
     background: rgba(79, 209, 102, .1)
+}
+
+.tab.quase {
+    border-color: var(--secondary);
+    background: rgba(247, 184, 79, .12)
+}
+
+.tab.quase .tst {
+    color: var(--secondary)
+}
+
+.tab.impossivel {
+    border-color: var(--error);
+    background: rgba(247, 79, 79, .1)
+}
+
+.tab.impossivel .tst {
+    color: var(--error)
 }
 
 /* grade cards */
@@ -1497,6 +1597,62 @@ input[type=range]::-webkit-slider-thumb {
 .formatura-card h2 {
     font-size: 26px;
     margin-bottom: 8px
+}
+
+.quase-card {
+    background: linear-gradient(135deg, rgba(247, 184, 79, .14), rgba(247, 142, 79, .07));
+    border: 1px solid #5a4626;
+    border-radius: var(--radius);
+    padding: 28px;
+    text-align: center
+}
+
+.quase-card h2 {
+    font-size: 23px;
+    margin-bottom: 8px;
+    color: var(--secondary)
+}
+
+.quase-faltam {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin: 10px 0
+}
+
+.impossivel-card {
+    background: linear-gradient(135deg, rgba(247, 79, 79, .12), rgba(247, 79, 142, .06));
+    border: 1px solid #5a2626;
+    border-radius: var(--radius);
+    padding: 28px;
+    text-align: center
+}
+
+.impossivel-card h2 {
+    font-size: 22px;
+    margin-bottom: 8px;
+    color: var(--error)
+}
+
+.motivos-list {
+    list-style: none;
+    padding: 0;
+    margin: 12px auto;
+    max-width: 580px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 6px
+}
+
+.motivos-list li {
+    font-size: 13px;
+    padding: 9px 12px;
+    background: var(--surface);
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--error)
 }
 
 .req-list {

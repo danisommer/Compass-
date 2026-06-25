@@ -30,12 +30,13 @@ const DIAS_UTEIS = [2, 3, 4, 5, 6];
 const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} em minutos
 for (const [p, s] of ORDEM_SLOTS) { const a = SLOTS[p][s]; SLOT_MIN[p + s] = { ini: hhmmMin(a[0]), fim: hhmmMin(a[1]) }; }
 const DEFAULT_TRAB = {
-    trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '18:00',
+    trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '12:00',
     // Dois eixos de flexibilidade:
     //  varHoras  = pode variar a quantidade de horas por dia (distribuição desigual).
     //  varHorario = pode variar o horário de início/fim entre os dias (trabalho se encaixa ao redor das
     //               aulas). Quando FALSE, o horário é FIXO e TRAVA a grade: nenhuma aula pode ocupá-lo.
-    varHoras: false, varHorario: false, desejInicio: '09:00', desejFim: '15:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
+    //  flexLado (só quando varHorario): qual ponta varia — 'inicio' (fim fixo) | 'fim' (início fixo) | 'ambos'.
+    varHoras: false, varHorario: false, flexLado: 'ambos', desejInicio: '08:00', desejFim: '12:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
 };  // trabalha: null = não respondido | true = Sim | false = Não
 // horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
 function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
@@ -48,6 +49,7 @@ function normTrab(w) {
         if (w.varHorario === undefined) o.varHorario = !!w.flexivel;
     }
     delete o.flexivel;
+    if (!['ambos', 'inicio', 'fim'].includes(o.flexLado)) o.flexLado = 'ambos';
     return o;
 }
 function fmtHHMM(min) { const h = Math.floor(min / 60), m = Math.round(min % 60); return `${String(h).padStart(2, '0')}h${String(m).padStart(2, '0')}`; }
@@ -73,6 +75,9 @@ function capacidadeDia(w, slotsAula) {
     const gap = Math.max(0, +w.folga || 0);
     const aulas = (slotsAula || []).map(h => SLOT_MIN[h.periodo + h.slot]).filter(Boolean);
     const coreIni = J.maxIni, coreFim = J.minFim, temCore = coreFim > coreIni;
+    // Horário variável: o trabalho pode escolher um intervalo livre dentro da janela.
+    // O lado que pode variar define qual intervalo é elegível (ver capacidadeFlex).
+    if (!temCore && w.varHorario) return capacidadeFlex(J, gap, aulas, w.flexLado || 'ambos');
     let left = J.ini, right = J.fim, coreLivre = true;
     for (const a of aulas) {
         if (temCore && a.ini < coreFim && a.fim > coreIni) coreLivre = false;  // aula sobre o núcleo
@@ -83,6 +88,28 @@ function capacidadeDia(w, slotsAula) {
     if (temCore && (left > coreIni || right < coreFim)) coreLivre = false;
     if (!coreLivre || right <= left) return { coreLivre: false, capH: 0, left, right };
     return { coreLivre: true, capH: Math.max(0, (right - left) / 60), left, right };
+}
+// Horário flexível: divide a janela [ini, fim] nos intervalos livres entre as aulas (com folga)
+// e escolhe um conforme o lado que pode variar:
+//  • 'fim'    → início fixo: usa o intervalo que começa em `ini` (trabalho ANTES das aulas);
+//  • 'inicio' → fim fixo:    usa o intervalo que termina em `fim` (trabalho DEPOIS das aulas);
+//  • 'ambos'  → o maior intervalo livre (encaixa onde melhor couber).
+function capacidadeFlex(J, gap, aulas, lado) {
+    const within = aulas.filter(a => a.fim > J.ini && a.ini < J.fim).sort((a, b) => a.ini - b.ini);
+    const livres = []; let cursor = J.ini;
+    for (const a of within) {
+        const aIni = Math.max(J.ini, a.ini - gap), aFim = Math.min(J.fim, a.fim + gap);
+        if (aIni > cursor) livres.push([cursor, aIni]);
+        cursor = Math.max(cursor, aFim);
+    }
+    if (cursor < J.fim) livres.push([cursor, J.fim]);
+    const validos = livres.filter(iv => iv[1] - iv[0] > 1e-6);
+    let chosen = null;
+    if (lado === 'fim') chosen = validos.find(iv => iv[0] <= J.ini + 1e-6) || null;
+    else if (lado === 'inicio') chosen = [...validos].reverse().find(iv => iv[1] >= J.fim - 1e-6) || null;
+    else chosen = validos.reduce((b, iv) => !b || (iv[1] - iv[0]) > (b[1] - b[0]) ? iv : b, null);
+    if (!chosen) return { coreLivre: false, capH: 0, left: J.ini, right: J.ini };
+    return { coreLivre: true, capH: Math.max(0, (chosen[1] - chosen[0]) / 60), left: chosen[0], right: chosen[1] };
 }
 
 // análise de UM dia: span livre + encaixe do horário preferido
@@ -97,8 +124,13 @@ function analiseDia(w, slotsAula) {
 
 // posiciona um bloco de `durMin` minutos ANCORADO no horário preferido [desejInicio, desejFim]
 function placeBloco(w, J, durMin, info) {
-    const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim), prefDur = Math.max(0, dFim - dIni);
     const left = info.left, right = info.right;
+    // Fim fixo (varia só o início): o bloco cola no FIM do intervalo livre e cresce p/ trás.
+    if (w.varHorario && w.flexLado === 'inicio') {
+        const end = Math.min(right, J.fim), start = Math.max(left, end - durMin);
+        return { startMin: start, endMin: end, horas: Math.max(0, (end - start) / 60) };
+    }
+    const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim), prefDur = Math.max(0, dFim - dIni);
     let start, end;
     if (durMin <= prefDur + 1e-6) {                               // <= preferido: usa o início preferido, recorta por aula
         start = Math.max(dIni, left); end = start + durMin;
@@ -237,6 +269,17 @@ function conflita(hA, hB) {
 function bloqueado(horarios, bloqueios) {
     for (const h of horarios) for (const b of bloqueios) if (h.diaSemana === b.diaSemana && h.periodo === b.periodo && h.slot === b.slot) return true;
     return false;
+}
+// alguma aula de `horarios` invade a janela de trabalho FIXO [inicio, fim] (com folga)?
+// Mesma regra usada em gerarGrades para descartar turmas quando o horário é fixo (varHorario=NO).
+function conflitaTrabalhoFixo(horarios, w) {
+    w = normTrab(w);
+    const wIni = hhmmMin(w.inicio), wFim = hhmmMin(w.fim), gap = Math.max(0, +w.folga || 0);
+    return (horarios || []).some(h => {
+        const sm = SLOT_MIN[h.periodo + h.slot];
+        if (!sm) return false;
+        return (sm.fim + gap) > wIni && (sm.ini - gap) < wFim;
+    });
 }
 
 /* Candidatas (disciplina + turmas viáveis) para um semestre */
@@ -481,7 +524,7 @@ function calcularHoras(matriz, cursadasSet, extras) {
 const API = {
     ...Parser,
     construirGrafo, getDisponiveis, getDesbloqueaveis, descendentesTransitivos, pontuarSel, pontuarSelDetalhe,
-    candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado,
+    candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado, conflitaTrabalhoFixo,
     SLOTS, DIAS,
     ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
     DIAS_UTEIS, DEFAULT_TRAB, normTrab, fmtHHMM, fmtDur, janelaTrab, capacidadeDia,

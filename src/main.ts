@@ -279,14 +279,19 @@ function blocosSemestreHTML(sem) {
     const camposTrab = `${campoHoras}
     ${campoJanela}
     ${folgaLabel}`;
+    const flexLado = w.flexLado || 'ambos';
+    // Rádios (mutuamente exclusivos) que aparecem quando o usuário pode variar o horário.
+    const flexLadoRadios = w.varHorario ? `
+    <div class="flexlado" style="flex-basis:100%">
+    ${[['inicio', 'Somente o horário de começo'], ['fim', 'Somente o horário de fim'], ['ambos', 'Ambos']].map(([v, t]) => `<button class="flexlado-opt ${flexLado === v ? 'on' : ''}" data-trab-flexlado="${v}" data-sem="${idx}"><span class="rb"></span>${t}</button>`).join('')}
+    </div>` : '';
     const presets = S.trabPresets || [];
-    const presetsRow = `
-    <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:2px">
-    <span class="muted">📁 Configurações salvas:</span>
-    ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${idx}" data-tip="Clique para aplicar &quot;${esc(p.nome)}&quot; a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma ainda</span>'}
+    // Controles de configurações salvas + propagação (só fazem sentido com trabalho ativo).
+    const presetControls = w.trabalha ? `
+    <span class="muted" style="font-size:12px">📁 Salvas:</span>
+    ${presets.length ? presets.map(p => `<span class="daychip ${mesmaCfgTrab(p.cfg, w) ? 'on' : ''}" data-trab-preset-apply="${p.id}" data-sem="${idx}" data-tip="Clique para aplicar &quot;${esc(p.nome)}&quot; a ${esc(sem.rotulo)}">${esc(p.nome)} <span data-trab-preset-del="${p.id}" data-tip="Excluir esta configuração" style="margin-left:5px;color:var(--secondary);font-weight:700">×</span></span>`).join('') : '<span class="muted" style="font-style:italic">nenhuma</span>'}
     <button class="btn btn-sm btn-ghost" data-trab-preset-save="${idx}">💾 Salvar atual…</button>
-    <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${idx}" data-tip="Copia este trabalho e os bloqueios manuais para todos os semestres seguintes">📋 Aplicar p/ semestres seguintes</button>
-    </div>`;
+    <button class="btn btn-sm btn-ghost" data-trab-aplicar-seg="${idx}" data-tip="${temRasc ? 'Aplica as alterações a ESTE semestre e copia o trabalho + bloqueios manuais para os seguintes' : 'Copia este trabalho e os bloqueios manuais para os semestres seguintes (não altera este)'}">📋 ${temRasc ? 'Aplicar p/ este e os seguintes' : 'Aplicar p/ semestres seguintes'}</button>` : '';
     const respondido = wSalvo.trabalha !== null && wSalvo.trabalha !== undefined;
     // S5.3 — total de horas fechado (✓ verde) × não fechado (✗ vermelho)
     const fechado = !wSalvo.trabalha || (trab.deficit <= 1e-6 && !trab.conflitosNucleo && !trab.rigidConf);
@@ -297,15 +302,18 @@ function blocosSemestreHTML(sem) {
             : fechado
                 ? `<span class="chip" style="color:var(--success)">✓ preenchido</span>`
                 : `<span class="chip" style="color:var(--error)">✗ preenchido (inválido)</span>`;
-    const aplicarBar = temRasc ? `
-<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;background:rgba(180,130,0,0.10);border-bottom:1px solid var(--line)">
-    <span style="font-size:13px;color:#c9a84c;flex:1">⚠ Você tem alterações não aplicadas. Clique em <b>Aplicar</b> para recalcular as grades.</span>
-    <button class="btn btn-sm btn-primary" data-trab-aplicar="${idx}">✔ Aplicar</button>
-    <button class="btn btn-sm btn-ghost" data-trab-descartar="${idx}">✕ Descartar</button>
-</div>` : '';
+    // Barra de ações unificada: presets/propagação à esquerda (menor destaque) e Aplicar à direita,
+    // sempre exibido — opaco/desabilitado quando não há alterações pendentes.
+    const acoesBar = `
+<div class="trab-acoes">
+    <div class="trab-acoes-l">${presetControls}</div>
+    <div class="trab-acoes-r">
+    ${temRasc ? `<span class="muted" style="font-size:12px;color:#c9a84c">⏳ não aplicado</span><button class="btn btn-sm btn-ghost" data-trab-descartar="${idx}">✕ Descartar</button>` : ''}
+    <button class="btn btn-sm btn-primary" data-trab-aplicar="${idx}" ${temRasc ? '' : 'disabled'} data-tip="${temRasc ? 'Aplica as alterações e recalcula as grades' : 'Sem alterações pendentes para aplicar'}">✔ Aplicar</button>
+    </div>
+</div>`;
     return `<details class="personalize" id="blocos-${idx}" ${!respondido ? 'open' : ''} style="margin-top:14px">
 <summary>🔒 Horários travados de ${esc(sem.rotulo)} ${indicativo} <span class="muted" style="font-weight:400;font-size:12px">— ${nMan} manual${nMan === 1 ? '' : 'is'}${wSalvo.trabalha ? ` + trabalho` : ''}</span></summary>
-${aplicarBar}
 <div class="work-form">
     <label style="gap:10px"><span style="color:var(--text);font-weight:600">💼 Você trabalha neste semestre?</span>
     <span class="segbtn">
@@ -325,13 +333,14 @@ ${aplicarBar}
         <button class="seg ${!w.varHorario ? 'on' : ''}" data-trab-varhorario="0" data-sem="${idx}">Não</button>
     </span>
     <span class="muted">${w.varHorario ? 'o trabalho se molda ao redor das aulas dentro da janela' : 'horário fixo — trava a grade contra aulas nesse intervalo'}</span></label>
-    ${presetsRow}
+    ${flexLadoRadios}
     ${camposTrab}
     <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${wSalvo.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no horário de trabalho</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) não comportam a carga</span>` : ''}</div>
     `: ''}
 </div>
 <div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você pode variar o horário entre os dias.</div>
 <div style="padding:0 16px 16px">${blockGridHTML(sem)}</div>
+${acoesBar}
 </details>`;
 }
 
@@ -764,8 +773,12 @@ ${(() => {
 }
 
 function tabHTML(s, i) {
-    const st = s.formatura ? 'formatura' : s.status;
-    const lbl = s.formatura ? '🎓 Formatura' : s.status === 'atual' ? 'atual' : s.status === 'confirmado' ? 'confirmado ✓' : 'futuro (est.)';
+    const st = s.formatura ? 'formatura' : s.cursoImpossivel ? 'impossivel' : s.quaseFormatura ? 'quase' : s.status;
+    const lbl = s.formatura ? '🎓 Formatura'
+        : s.cursoImpossivel ? '⛔ Sem solução'
+            : s.quaseFormatura ? '🟠 Quase lá'
+                : s.status === 'atual' ? 'atual'
+                    : s.status === 'confirmado' ? 'confirmado ✓' : 'futuro (est.)';
     return `<button class="tab ${st} ${i === S.abaAtiva ? 'active' : ''}" data-tab="${i}">
 <span class="ttl">${s.rotulo}</span><span class="tst">${lbl}</span></button>`;
 }
@@ -773,6 +786,8 @@ function tabHTML(s, i) {
 function semestreHTML(sem) {
     if (sem.idx === 0) return semAtualHTML(sem);
     if (sem.formatura) return formaturaHTML(sem) + planoSemestreHTML(sem);
+    if (sem.cursoImpossivel) return impossivelHTML(sem) + planoSemestreHTML(sem);
+    if (sem.quaseFormatura) return quaseFormaturaHTML(sem) + planoSemestreHTML(sem);
     return planoSemestreHTML(sem);
 }
 
@@ -1059,10 +1074,11 @@ function editorHTML(sem) {
 </div></div>`;
 }
 
-/* ---------- Formatura ---------- */
-function formaturaHTML(sem) {
+/* ---------- Formatura / estados terminais ---------- */
+// Checklist de integralização (mesma estrutura usada nos cartões de formatura, "quase lá" e "sem solução").
+function reqsFormatura(sem) {
     const h = sem.horas; const m = S.manuais;
-    const reqs = [
+    return [
         ['Obrigatórias', h.obrigatorias.faltante === 0],
         ['Segundo Estrato [1159]', h.conj1159.faltante === 0],
         ['Humanidades [1161]', h.conj1161.faltante === 0],
@@ -1072,11 +1088,39 @@ function formaturaHTML(sem) {
         ['ENADE Concluinte', m.enade.done],
         ['TCC 2 (ICSX41)', D.cursadasFinal && D.cursadasFinal.has('ICSX41')],
     ];
+}
+function reqListHTML(reqs) {
+    return `<ul class="req-list">${reqs.map(([t, ok]) => `<li><span class="mk">${ok ? '✅' : '⬜'}</span>${esc(t)}</li>`).join('')}</ul>`;
+}
+function formaturaHTML(sem) {
     return `<div class="formatura-card">
-<div class="badge-grad">🎓</div><h2>Formatura projetada em ${sem.rotulo}!</h2>
+<div class="badge-grad">🎓</div><h2>Formatura projetada em ${esc(sem.rotulo)}!</h2>
 <p class="muted">Todos os critérios de integralização foram satisfeitos nesta projeção.</p>
-<ul class="req-list">${reqs.map(([t, ok]) => `<li><span class="mk">${ok ? '✅' : '⬜'}</span>${t}</li>`).join('')}</ul>
-</div>`;
+${reqListHTML(reqsFormatura(sem))}</div>`;
+}
+// Estado intermediário (amarelo): só faltam itens não presenciais / manuais.
+function quaseFormaturaHTML(sem) {
+    const reqs = reqsFormatura(sem);
+    const faltam = reqs.filter(([, ok]) => !ok).map(([t]) => t);
+    return `<div class="quase-card">
+<div class="badge-grad">🟠</div><h2>Quase lá — ${esc(sem.rotulo)}</h2>
+<p class="muted">Você concluiu todas as <b>disciplinas presenciais</b> exigidas. Para se formar faltam apenas itens <b>não presenciais / manuais</b>, que você marca na barra lateral (“🧩 Itens não presenciais / manuais”) conforme realiza:</p>
+<div class="quase-faltam">${faltam.length ? faltam.map(t => `<span class="chip" style="color:var(--secondary)">⬜ ${esc(t)}</span>`).join('') : '<span class="muted">—</span>'}</div>
+<h4 style="margin:14px 0 6px">Checklist de integralização</h4>
+${reqListHTML(reqs)}</div>`;
+}
+// Estado de inviabilidade (vermelho): não há grade que permita concluir o curso.
+function impossivelHTML(sem) {
+    const motivos = sem.motivosImpossivel || [];
+    const lista = motivos.map(mo => mo.cod
+        ? `<li><b class="mono">${esc(mo.cod)}</b> ${esc(mo.nome)} — ${esc(mo.motivo)}</li>`
+        : `<li>${esc(mo.motivo)}</li>`).join('');
+    return `<div class="impossivel-card">
+<div class="badge-grad">⛔</div><h2>Sem solução automática — ${esc(sem.rotulo)}</h2>
+<p class="muted">As disciplinas que ainda faltam <b>não cabem em nenhuma grade</b> com as suas restrições atuais (bloqueios e/ou horário de trabalho fixo), ou não têm turma ofertada. Ajuste os <b>horários travados</b> / o <b>trabalho</b> abaixo (ou em semestres anteriores), ou reveja a oferta de Turmas Abertas:</p>
+<ul class="motivos-list">${lista}</ul>
+<h4 style="margin:14px 0 6px">O que já está integralizado</h4>
+${reqListHTML(reqsFormatura(sem))}</div>`;
 }
 
 /* ===================================================================
@@ -1110,11 +1154,21 @@ async function onClick(e) {
     const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; trabRascunhoSet(i, { trabalha: false }); salvar(); rerenderKeepOpen(); return; }
     const tvh = t.closest('[data-trab-varhoras]'); if (tvh) { const i = +tvh.dataset.sem; trabRascunhoSet(i, { varHoras: tvh.dataset.trabVarhoras === '1' }); salvar(); rerenderKeepOpen(); return; }
     const tvt = t.closest('[data-trab-varhorario]'); if (tvt) { const i = +tvt.dataset.sem; trabRascunhoSet(i, { varHorario: tvt.dataset.trabVarhorario === '1' }); salvar(); rerenderKeepOpen(); return; }
+    const tfl = t.closest('[data-trab-flexlado]'); if (tfl) { const i = +tfl.dataset.sem; trabRascunhoSet(i, { flexLado: tfl.dataset.trabFlexlado }); salvar(); rerenderKeepOpen(); return; }
     // Aplicar rascunho -> copia trabalho E bloqueios manuais para o estado salvo e recalcula
     const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; const a = trabAplicarRascunho(i); const b = bloqAplicarRascunho(i); if (a || b) limparEscolhasDesde(i); toast('Horários travados aplicados · grades recalculadas'); rerenderKeepOpen(); return; }
     // Descartar rascunho -> restaura trabalho E bloqueios salvos
     const tdes = t.closest('[data-trab-descartar]'); if (tdes) { const i = +tdes.dataset.trabDescartar; trabDescartarRascunho(i); bloqDescartarRascunho(i); salvar(); rerenderKeepOpen(); return; }
-    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) { const i = +tas.dataset.trabAplicarSeg; trabAplicarRascunho(i); bloqAplicarRascunho(i); const n = aplicarTrabSeguintes(i); limparEscolhasDesde(i); toast(n ? `Aplicado a este e a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'); rerenderKeepOpen(); return; }
+    const tas = t.closest('[data-trab-aplicar-seg]'); if (tas) {
+        const i = +tas.dataset.trabAplicarSeg;
+        const temRasc = trabTemRascunho(i) || bloqTemRascunho(i);
+        if (temRasc) { trabAplicarRascunho(i); bloqAplicarRascunho(i); limparEscolhasDesde(i); }   // aplica também a ESTE semestre
+        const n = aplicarTrabSeguintes(i);                                                          // copia config salva aos seguintes
+        toast(temRasc
+            ? (n ? `Aplicado a este e a ${n} semestre(s) seguinte(s)` : 'Aplicado a este semestre')
+            : (n ? `Aplicado a ${n} semestre(s) seguinte(s)` : 'Não há semestres seguintes'));
+        rerenderKeepOpen(); return;
+    }
     const pdel = t.closest('[data-trab-preset-del]'); if (pdel) { const p = (S.trabPresets || []).find(p => p.id === pdel.dataset.trabPresetDel); if (p && confirm(`Excluir a configuração de trabalho "${p.nome}"?`)) excluirPresetTrab(pdel.dataset.trabPresetDel); rerenderKeepOpen(); return; }
     const papp = t.closest('[data-trab-preset-apply]'); if (papp) { const i = +papp.dataset.sem; const p = (S.trabPresets || []).find(x => x.id === papp.dataset.trabPresetApply); if (p) { trabRascunhoSet(i, Object.assign({}, p.cfg, { trabalha: true })); toast('Configuração carregada no rascunho — clique em Aplicar'); } rerenderKeepOpen(); return; }
     const psav = t.closest('[data-trab-preset-save]'); if (psav) { const i = +psav.dataset.trabPresetSave; const nome = (prompt('Nome desta configuração de trabalho (ex.: "Meio período", "Integral"):', '') || '').trim(); if (nome) { salvarPresetTrab(i, nome); toast('Configuração salva'); } rerenderKeepOpen(); return; }
@@ -1179,12 +1233,27 @@ function onChange(e) {
     const tr = e.target.closest('[data-trab]');
     if (tr) {
         const i = +tr.dataset.sem, k = tr.dataset.trab;
-        const numericos = { horas: 1, diasVariaveis: 1, folga: 1 };
+        const cur = trabRascunhoOuSalvo(i);
+        const toHHMM = m => { m = Math.max(0, Math.min(1439, Math.round(m))); return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
         const updates: any = {};
-        // horário fixo (varHorario=NO): "Trabalhar das X às Y" define toda a janela travada
-        if (k === 'comeco') { updates.inicio = updates.maxComeco = updates.desejInicio = tr.value; }
-        else if (k === 'termino') { updates.fim = updates.minFim = updates.desejFim = tr.value; }
-        else updates[k] = numericos[k] ? (+tr.value || 0) : tr.value;
+        // horas/semana predefine a janela: largura diária = horas/semana ÷ 5 dias.
+        // Mexer numa ponta recalcula a outra mantendo essa largura.
+        if (k === 'horas') {
+            const horas = +tr.value || 0; const dur = horas / 5 * 60;
+            updates.horas = horas;
+            updates.fim = updates.minFim = updates.desejFim = toHHMM(K.hhmmMin(cur.inicio) + dur);
+        } else if (k === 'comeco') {
+            const dur = (+cur.horas || 0) / 5 * 60; const ini = K.hhmmMin(tr.value);
+            updates.inicio = updates.maxComeco = updates.desejInicio = tr.value;
+            updates.fim = updates.minFim = updates.desejFim = toHHMM(ini + dur);
+        } else if (k === 'termino') {
+            const dur = (+cur.horas || 0) / 5 * 60; const fim = K.hhmmMin(tr.value);
+            updates.fim = updates.minFim = updates.desejFim = tr.value;
+            updates.inicio = updates.maxComeco = updates.desejInicio = toHHMM(fim - dur);
+        } else {
+            const numericos = { diasVariaveis: 1, folga: 1 };
+            updates[k] = numericos[k] ? (+tr.value || 0) : tr.value;
+        }
         trabRascunhoSet(i, updates);
         salvar(); rerenderKeepOpen(); return;
     }

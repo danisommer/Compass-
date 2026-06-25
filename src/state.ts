@@ -161,6 +161,87 @@ function calcHorasIdx(cursadasSet, idx) {
     return h;
 }
 
+// uma disciplina disponível ainda reduz algum requisito (de disciplina) não satisfeito?
+function disciplinaAjuda(d, h) {
+    if (!d.isOpcional) return h.obrigatorias.faltante > 0;
+    if ((d.chExt || 0) > 0 && h.extensao.faltante > 0) return true;
+    if (d.conjuntoOptativo === '1159') return h.conj1159.faltante > 0;
+    if (d.conjuntoOptativo === '1161') return h.conj1161.faltante > 0;
+    if (d.conjuntoOptativo === '1160') return h.trilhas.faltante > 0 || h.trilhas.validadas < K.REQUISITOS.trilhasNecessarias;
+    return false;
+}
+// a candidata tem alguma turma que não esbarra num bloqueio manual nem no trabalho fixo deste semestre?
+function temTurmaViavel(c, idx) {
+    const bloqs = manualBlocos(idx);
+    const w = K.normTrab(trabDoSem(idx));
+    const trabFixo = !!w.trabalha && !w.varHorario && +w.horas > 0;
+    return (c.turmas || []).some(t => {
+        const hor = t.horarios || [];
+        if (!hor.length) return true;   // sem horário detalhado → não há conflito de horário
+        if (K.bloqueado(hor, bloqs)) return false;
+        if (trabFixo && K.conflitaTrabalhoFixo(hor, w)) return false;
+        return true;
+    });
+}
+// disciplina satisfeita por marcação manual (estágio/ENADE): não tem aula/turma
+function ehDiscManual(d) { return (d.chSemanal || 0) === 0 || /EST[ÁA]GIO|ENADE/i.test(d.modeloDisciplina || ''); }
+
+// Classifica o fim da projeção quando não há mais progresso acadêmico possível:
+//  • só faltam itens manuais/não presenciais → { quaseFormatura: true }
+//  • faltam disciplinas inalcançáveis (conflito de horário ou sem oferta) → { cursoImpossivel, motivosImpossivel }
+function classificarTerminal(horas, cursadasSet, candUteis, idx) {
+    const obrigPend = D.matriz.disciplinas.filter(d => !d.isOpcional && !cursadasSet.has(d.codigo) && !ehDiscManual(d));
+    const conjPend = horas.conj1159.faltante > 0 || horas.conj1161.faltante > 0 ||
+        horas.trilhas.faltante > 0 || horas.trilhas.validadas < K.REQUISITOS.trilhasNecessarias;
+    if (!obrigPend.length && !conjPend) return { quaseFormatura: true };
+    return { cursoImpossivel: true, motivosImpossivel: motivosImpossivel(obrigPend, candUteis, cursadasSet, idx) };
+}
+// Monta a lista de "porquês" da inviabilidade (gargalos de horário / oferta) para exibir ao usuário.
+function motivosImpossivel(obrigPend, candUteis, cursadasSet, idx) {
+    const bloqs = manualBlocos(idx);
+    const w = K.normTrab(trabDoSem(idx));
+    const trabFixo = !!w.trabalha && !w.varHorario && +w.horas > 0;
+    const motivos = [], visto = new Set();
+    const analisar = (d, turmas) => {
+        if (visto.has(d.codigo)) return; visto.add(d.codigo);
+        turmas = (turmas || []).filter(t => (t.horarios || []).length);
+        if (!turmas.length) { motivos.push({ cod: d.codigo, nome: d.nome, motivo: 'nenhuma turma com horário ofertada' }); return; }
+        const nomesBloq = new Set(); let comTrab = false;
+        for (const t of turmas) {
+            const hits = bloqs.filter(b => t.horarios.some(h => h.diaSemana === b.diaSemana && h.periodo === b.periodo && h.slot === b.slot));
+            const tc = trabFixo && K.conflitaTrabalhoFixo(t.horarios, w);
+            if (!hits.length && !tc) return;   // existe turma encaixável → não é o gargalo permanente
+            hits.forEach(b => nomesBloq.add(b.nome)); if (tc) comTrab = true;
+        }
+        const partes = [];
+        if (nomesBloq.size) partes.push(`bloqueio(s): ${[...nomesBloq].join(', ')}`);
+        if (comTrab) partes.push('horário de trabalho fixo');
+        motivos.push({ cod: d.codigo, nome: d.nome, motivo: `todas as turmas conflitam com ${partes.join(' e ')}` });
+    };
+    // disciplinas necessárias e disponíveis (gargalo direto: todas as turmas bloqueadas)
+    (candUteis || []).forEach(c => analisar(c.disciplina, c.turmas));
+    // obrigatórias necessárias porém indisponíveis (sem oferta ou pré-requisito pendente)
+    obrigPend.forEach(d => {
+        if (visto.has(d.codigo)) return;
+        const oferta = D.gnhByCod.get(d.codigo);
+        if (!oferta || !oferta.length) { motivos.push({ cod: d.codigo, nome: d.nome, motivo: 'não ofertada nas Turmas Abertas' }); visto.add(d.codigo); return; }
+        const faltamPre = d.preRequisitos.filter(p => !cursadasSet.has(p));
+        if (faltamPre.length) { motivos.push({ cod: d.codigo, nome: d.nome, motivo: `pré-requisito(s) não concluído(s): ${faltamPre.join(', ')}` }); visto.add(d.codigo); }
+    });
+    if (!motivos.length) motivos.push({ cod: null, nome: null, motivo: 'Não há combinação de turmas sem conflito de horário que permita cursar as disciplinas restantes.' });
+    return motivos;
+}
+// Semestre "resumo" terminal (sem grade): usado quando a projeção para sem um semestre real anterior.
+function semestreTerminal(idx, horas, cursadasSet, term) {
+    return Object.assign({
+        idx, rotulo: rotuloSem(idx), status: 'futuro',
+        grade: { sel: [] }, grades: [], personalizadas: [], recKey: null, escolhida: false,
+        horas, candidatas: [], manuais: manualNoSem(idx), formatura: false,
+        estourou: false, inviavel: true, bloqueios: manualBlocos(idx), trab: trabCalc(idx, []),
+        cursadasAntes: new Set(cursadasSet), faltObrig: new Set(), aguardandoTrab: false
+    }, term);
+}
+
 function projetar() {
     const sems = [];
     // Semestre 0 = atual (2026/1) — em andamento, leitura
@@ -182,6 +263,16 @@ function projetar() {
         const faltObrig = new Set(D.matriz.disciplinas.filter(d => !d.isOpcional && !curIdx.has(d.codigo)).map(d => d.codigo));
         const periodoRef = (D.hist.aluno.periodoAtual || 1) + idx;   // período nominal deste semestre projetado
         const hAgora = calcHorasIdx(curIdx, idx);                    // conjuntos optativos já satisfeitos?
+        // Parada inteligente: não há mais disciplina útil E encaixável para avançar a integralização.
+        // Em vez de gerar semestres indefinidamente, classifica o estado terminal (quase formatura / impossível).
+        const candUteis = cand.filter(c => disciplinaAjuda(c.disciplina, hAgora));
+        if (!candUteis.some(c => temTurmaViavel(c, idx))) {
+            D.cursadasFinal = curIdx;
+            const term = classificarTerminal(hAgora, curIdx, candUteis, idx);
+            if (term.quaseFormatura && sems.length > 1) Object.assign(sems[sems.length - 1], term);
+            else sems.push(semestreTerminal(idx, hAgora, curIdx, term));
+            break;
+        }
         const conjFeitos = {
             '1159': hAgora.conj1159.faltante === 0,
             '1161': hAgora.conj1161.faltante === 0,
@@ -225,17 +316,18 @@ function projetar() {
         D.cursadasFinal = cursadas;
         const formatura = formaturaOK(horas, idx);
 
-        sems.push({
+        const sem = {
             idx, rotulo: rotuloSem(idx), status: confirmada ? 'confirmado' : 'futuro',
             grade: escolhida, grades, personalizadas: pers, recKey, escolhida: confirmada, horas, candidatas: ord,
             manuais: manuaisAqui, formatura, estourou: ger.estourou, inviavel: grades.length === 0,
             bloqueios: manuais, trab: trabCalc(idx, escolhida.sel), cursadasAntes: curIdx, faltObrig,
             aguardandoTrab: !trabRespondido(idx)   // S2: só exibe cronograma/grades após responder se trabalha
-        });
+        };
+        sems.push(sem);
 
         if (formatura) break;
-        // se nada novo entrou e não há candidatas, evita loop infinito
-        if (add.length === 0 && manuaisAqui.length === 0 && idx > 1 && grades.length === 0) break;
+        // salvaguarda: mesmo com candidatas úteis nada avançou (tudo bloqueado) → encerra classificando este semestre
+        if (!add.length) { Object.assign(sem, classificarTerminal(horas, cursadas, candUteis, idx)); break; }
     }
     return sems;
 }
