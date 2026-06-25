@@ -6,7 +6,7 @@
   "description": "Compass+ — Planejamento Acadêmico UTFPR",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
