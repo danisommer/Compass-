@@ -269,7 +269,7 @@ function blocosSemestreHTML(sem) {
         const iv = trab.intervalos && trab.intervalos[d];
         return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
     }).join(' · ');
-    const folgaLabel = `<label data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${idx}"> min</label>`;
+    const folgaLabel = `<label style="flex-basis:100%" data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${idx}"> min</label>`;
     // Campos do trabalho. A janela [início, fim] é definida pelos mesmos campos (comeco/termino);
     // o que muda com varHorario é o rótulo e o comportamento: fixo trava a grade, flexível se molda.
     const campoHoras = `<label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>`;
