@@ -19,38 +19,42 @@ const ORDEM_SLOTS = [];
 ['M', 'T', 'N'].forEach(p => { const n = p === 'N' ? 5 : 6; for (let s = 1; s <= n; s++) ORDEM_SLOTS.push([p, s]); });
 function hhmmMin(s) { const m = String(s).match(/(\d{1,2})[h:](\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : 0; }
 function slotTexto(p, s) { const a = SLOTS[p] && SLOTS[p][s]; return a ? `${a[0]}–${a[1]}` : ''; }
-/* ---- Trabalho: horário preferido + flexibilidade ----
-    Janela: começar entre [inicio, maxComeco] e terminar entre [minFim, fim];
-    núcleo obrigatório = [maxComeco, minFim] (sempre trabalhado).
-    O bloco diário é ANCORADO no horário preferido [desejInicio, desejFim] e só muda
-    quando precisa. Com horas variáveis, a carga busca HOMOGENEIDADE (total semanal ÷ nº de
-    dias, igual em todos os dias) e só desvia quando a capacidade de um dia (cortada por
-    aulas) não comporta a média — a sobra é redistribuída aos dias com folga (water-filling),
-    mantendo TODO dia com trabalho. */
+/* ---- Trabalho: dois modos (refatorado) ----
+    UM eixo só: `modo` ∈ {'fixo', 'flexivel'}.
+      • FIXO     → a janela [inicio, fim] é o bloco exato, igual todo dia útil, e TRAVA a grade:
+                   nenhuma aula pode ocupá-la (com a folga). A carga semanal é DERIVADA da janela
+                   (= 5 × duração da janela), não é perguntada.
+      • FLEXÍVEL → o trabalho encaixa a carga semanal `horas` ao redor das aulas, dentro da
+                   janela-limite [inicio, fim]. A distribuição busca HOMOGENEIDADE (horas ÷ 5 por
+                   dia, water-filling) e `ancora` define onde o bloco diário se fixa:
+                     'inicio' = começo fixo (cresce p/ frente) | 'fim' = fim fixo (cresce p/ trás)
+                     | 'livre' = encaixa no maior intervalo livre. */
 const DIAS_UTEIS = [2, 3, 4, 5, 6];
 const SLOT_MIN = {};                                       // 'M1' -> {ini,fim} em minutos
 for (const [p, s] of ORDEM_SLOTS) { const a = SLOTS[p][s]; SLOT_MIN[p + s] = { ini: hhmmMin(a[0]), fim: hhmmMin(a[1]) }; }
 const DEFAULT_TRAB = {
-    trabalha: null, horas: 20, inicio: '08:00', maxComeco: '08:00', minFim: '12:00', fim: '12:00',
-    // Dois eixos de flexibilidade:
-    //  varHoras  = pode variar a quantidade de horas por dia (distribuição desigual).
-    //  varHorario = pode variar o horário de início/fim entre os dias (trabalho se encaixa ao redor das
-    //               aulas). Quando FALSE, o horário é FIXO e TRAVA a grade: nenhuma aula pode ocupá-lo.
-    //  flexLado (só quando varHorario): qual ponta varia — 'inicio' (fim fixo) | 'fim' (início fixo) | 'ambos'.
-    varHoras: false, varHorario: false, flexLado: 'ambos', desejInicio: '08:00', desejFim: '12:00', diasVariaveis: 1, diasPreferidos: [], folga: 0
-};  // trabalha: null = não respondido | true = Sim | false = Não
-// horas/dia desejáveis derivadas do horário preferido [desejInicio, desejFim]
-function desejHoras(w) { w = normTrab(w); return Math.max(0, (hhmmMin(w.desejFim) - hhmmMin(w.desejInicio)) / 60); }
+    trabalha: null,                          // null = não respondido | true = Sim | false = Não
+    modo: 'fixo',                            // 'fixo' (trava a grade) | 'flexivel' (encaixa ao redor das aulas)
+    horas: 20,                               // total semanal (flexível); no fixo é derivado da janela
+    inicio: '08:00', fim: '12:00',           // janela: bloco exato (fixo) ou faixa-limite (flexível)
+    ancora: 'livre',                         // só flexível: 'inicio' (começo fixo) | 'fim' (fim fixo) | 'livre'
+    folga: 0                                 // intervalo mínimo (min) trabalho↔aula, nos dois sentidos
+};
+// duração da janela [inicio, fim] em horas
+function janelaHoras(w) { return Math.max(0, (hhmmMin(w.fim) - hhmmMin(w.inicio)) / 60); }
 function normTrab(w) {
-    const o = Object.assign({}, DEFAULT_TRAB, w || {});
-    o.diasPreferidos = Array.isArray(o.diasPreferidos) ? o.diasPreferidos.slice() : [];
-    // migração do modelo antigo: o campo único `flexivel` vira os dois eixos
-    if (w && w.flexivel !== undefined) {
-        if (w.varHoras === undefined) o.varHoras = !!w.flexivel;
-        if (w.varHorario === undefined) o.varHorario = !!w.flexivel;
-    }
-    delete o.flexivel;
-    if (!['ambos', 'inicio', 'fim'].includes(o.flexLado)) o.flexLado = 'ambos';
+    w = w || {};
+    const o = Object.assign({}, DEFAULT_TRAB, w);
+    // migração do modelo antigo (varHoras/varHorario/flexLado/flexivel → modo/ancora).
+    // Atenção: flexLado nomeava qual ponta VARIAVA; ancora nomeia onde o bloco FICA fixo → invertem-se.
+    const varHorario = w.varHorario !== undefined ? w.varHorario : (w.flexivel !== undefined ? w.flexivel : undefined);
+    if (w.modo === undefined && varHorario !== undefined) o.modo = varHorario ? 'flexivel' : 'fixo';
+    if (w.ancora === undefined && w.flexLado !== undefined) o.ancora = w.flexLado === 'ambos' ? 'livre' : (w.flexLado === 'inicio' ? 'fim' : 'inicio');
+    if (!['fixo', 'flexivel'].includes(o.modo)) o.modo = 'fixo';
+    if (!['inicio', 'fim', 'livre'].includes(o.ancora)) o.ancora = 'livre';
+    if (o.modo === 'fixo') o.horas = 5 * janelaHoras(o);                 // fixo: carga semanal derivada da janela
+    for (const k of ['varHoras', 'varHorario', 'flexLado', 'flexivel', 'maxComeco', 'minFim', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos'])
+        delete o[k];
     return o;
 }
 function fmtHHMM(min) { const h = Math.floor(min / 60), m = Math.round(min % 60); return `${String(h).padStart(2, '0')}h${String(m).padStart(2, '0')}`; }
@@ -59,134 +63,125 @@ function fmtDur(h) { const tot = Math.round(h * 60), hh = Math.floor(tot / 60), 
 function janelaTrab(w) {
     w = normTrab(w);
     const ini = hhmmMin(w.inicio), fim = hhmmMin(w.fim);
-    // Núcleo (sempre trabalhado) = janela INTEIRA apenas no bloco totalmente fixo (horário fixo + horas iguais),
-    // em que o trabalho ocupa toda a janela todo dia. Nos demais casos o núcleo é 0:
-    //  • horário flexível → o bloco se MOLDA ao redor das aulas dentro de [ini, fim];
-    //  • horas variáveis → a carga se distribui livremente dentro da janela.
-    const blocoFixo = !w.varHorario && !w.varHoras;
-    let maxIni = ini, minFim = blocoFixo ? fim : ini;
-    if (minFim < maxIni) minFim = maxIni;                        // núcleo >= 0
-    return { ini, fim, maxIni, minFim, coreH: Math.max(0, (minFim - maxIni) / 60), maxH: Math.max(0, (fim - ini) / 60) };
+    return { ini, fim, maxH: Math.max(0, (fim - ini) / 60) };
 }
 
-// capacidade de trabalho de UM dia, dado os slots de aula desse dia
-// folga = intervalo mínimo (min) entre o trabalho e qualquer aula (deslocamento), nos dois sentidos
+// capacidade de trabalho de UM dia, dado os slots de aula desse dia.
+// folga = intervalo mínimo (min) entre o trabalho e qualquer aula (deslocamento), nos dois sentidos.
+// Retorna { coreLivre, capH, left, right }: o intervalo [left,right] onde o bloco do dia pode ficar.
 function capacidadeDia(w, slotsAula) {
-    const J = janelaTrab(w);
-    const gap = Math.max(0, +w.folga || 0);
+    w = normTrab(w);
+    const ini = hhmmMin(w.inicio), fim = hhmmMin(w.fim), gap = Math.max(0, +w.folga || 0);
     const aulas = (slotsAula || []).map(h => SLOT_MIN[h.periodo + h.slot]).filter(Boolean);
-    const coreIni = J.maxIni, coreFim = J.minFim, temCore = coreFim > coreIni;
-    // Horário variável: o trabalho pode escolher um intervalo livre dentro da janela.
-    // O lado que pode variar define qual intervalo é elegível (ver capacidadeFlex).
-    if (!temCore && w.varHorario) return capacidadeFlex(J, gap, aulas, w.flexLado || 'ambos');
-    let left = J.ini, right = J.fim, coreLivre = true;
-    for (const a of aulas) {
-        if (temCore && a.ini < coreFim && a.fim > coreIni) coreLivre = false;  // aula sobre o núcleo
-        else if (a.fim <= coreIni) { if (a.fim + gap > left) left = a.fim + gap; }  // aula antes: começa só após a folga
-        else { if (a.ini - gap < right) right = a.ini - gap; }                   // aula depois: termina antes da folga
+    if (w.modo === 'fixo') {
+        // FIXO: a janela inteira é o bloco (já travada contra aulas). Uma aula sobre ela (com a
+        // folga) "fura" a trava — o dia perde a capacidade e vira conflito.
+        const furada = aulas.some(a => (a.fim + gap) > ini && (a.ini - gap) < fim);
+        return furada ? { coreLivre: false, capH: 0, left: ini, right: ini }
+                      : { coreLivre: true, capH: Math.max(0, (fim - ini) / 60), left: ini, right: fim };
     }
-    // com a folga, o span livre precisa cobrir o núcleo; senão não há como encaixar o trabalho
-    if (temCore && (left > coreIni || right < coreFim)) coreLivre = false;
-    if (!coreLivre || right <= left) return { coreLivre: false, capH: 0, left, right };
-    return { coreLivre: true, capH: Math.max(0, (right - left) / 60), left, right };
+    // FLEXÍVEL: escolhe um intervalo livre dentro de [ini, fim] conforme a âncora.
+    return capacidadeFlex(ini, fim, gap, aulas, w.ancora);
 }
-// Horário flexível: divide a janela [ini, fim] nos intervalos livres entre as aulas (com folga)
-// e escolhe um conforme o lado que pode variar:
-//  • 'fim'    → início fixo: usa o intervalo que começa em `ini` (trabalho ANTES das aulas);
-//  • 'inicio' → fim fixo:    usa o intervalo que termina em `fim` (trabalho DEPOIS das aulas);
-//  • 'ambos'  → o maior intervalo livre (encaixa onde melhor couber).
-function capacidadeFlex(J, gap, aulas, lado) {
-    const within = aulas.filter(a => a.fim > J.ini && a.ini < J.fim).sort((a, b) => a.ini - b.ini);
-    const livres = []; let cursor = J.ini;
+// Flexível: divide [ini, fim] nos intervalos livres entre as aulas (com folga) e escolhe um conforme a
+// âncora. A âncora é uma PREFERÊNCIA de posição, não um veto: se a ponta preferida estiver ocupada por
+// aula, o dia ainda trabalha no intervalo livre mais próximo dela (todo dia com folga recebe trabalho).
+//  • 'inicio' (começo fixo) → intervalo livre MAIS CEDO (trabalha o quanto antes; = começa em `ini` se livre);
+//  • 'fim'    (fim fixo)     → intervalo livre MAIS TARDE (trabalha o quanto depois; = termina em `fim` se livre);
+//  • 'livre'                 → o MAIOR intervalo livre (encaixa onde melhor couber).
+function capacidadeFlex(ini, fim, gap, aulas, ancora) {
+    const within = aulas.filter(a => a.fim > ini && a.ini < fim).sort((a, b) => a.ini - b.ini);
+    const livres = []; let cursor = ini;
     for (const a of within) {
-        const aIni = Math.max(J.ini, a.ini - gap), aFim = Math.min(J.fim, a.fim + gap);
+        const aIni = Math.max(ini, a.ini - gap), aFim = Math.min(fim, a.fim + gap);
         if (aIni > cursor) livres.push([cursor, aIni]);
         cursor = Math.max(cursor, aFim);
     }
-    if (cursor < J.fim) livres.push([cursor, J.fim]);
-    const validos = livres.filter(iv => iv[1] - iv[0] > 1e-6);
+    if (cursor < fim) livres.push([cursor, fim]);
+    const validos = livres.filter(iv => iv[1] - iv[0] > 1e-6);   // já em ordem crescente de horário
     let chosen = null;
-    if (lado === 'fim') chosen = validos.find(iv => iv[0] <= J.ini + 1e-6) || null;
-    else if (lado === 'inicio') chosen = [...validos].reverse().find(iv => iv[1] >= J.fim - 1e-6) || null;
-    else chosen = validos.reduce((b, iv) => !b || (iv[1] - iv[0]) > (b[1] - b[0]) ? iv : b, null);
-    if (!chosen) return { coreLivre: false, capH: 0, left: J.ini, right: J.ini };
+    if (ancora === 'inicio') chosen = validos[0] || null;                         // mais cedo
+    else if (ancora === 'fim') chosen = validos[validos.length - 1] || null;      // mais tarde
+    else chosen = validos.reduce((b, iv) => !b || (iv[1] - iv[0]) > (b[1] - b[0]) ? iv : b, null);  // maior
+    if (!chosen) return { coreLivre: false, capH: 0, left: ini, right: ini };
     return { coreLivre: true, capH: Math.max(0, (chosen[1] - chosen[0]) / 60), left: chosen[0], right: chosen[1] };
 }
 
-// análise de UM dia: span livre + encaixe do horário preferido
-function analiseDia(w, slotsAula) {
-    const c = capacidadeDia(w, slotsAula);
-    const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim);
-    const pStart = Math.max(dIni, c.left), pEnd = Math.min(dFim, c.right);
-    const prefFitH = Math.max(0, (pEnd - pStart) / 60);             // horas do preferido que ficam livres
-    const prefLivre = c.coreLivre && c.left <= dIni && c.right >= dFim;  // preferido inteiro livre de aula
-    return { coreLivre: c.coreLivre, left: c.left, right: c.right, capH: c.capH, prefFitH, prefLivre };
-}
+// análise de UM dia (= capacidade); mantida como ponto único usado por custoTrab/blocosTrabalhoCalc.
+function analiseDia(w, slotsAula) { return capacidadeDia(w, slotsAula); }
 
-// posiciona um bloco de `durMin` minutos ANCORADO no horário preferido [desejInicio, desejFim]
-function placeBloco(w, J, durMin, info) {
+// posiciona um bloco de `durMin` minutos no intervalo livre [info.left, info.right] conforme a âncora:
+//  • 'fim'             → cola no FIM e cresce p/ trás;
+//  • 'inicio'/'livre'  → cola no INÍCIO e cresce p/ frente (no fixo, o bloco É a janela inteira).
+// Os horários do bloco são snapados a uma grade de 5 min (evita exibir trabalho terminando às 6h37).
+const round5 = m => Math.round(m / 5) * 5;
+function placeBloco(w, durMin, info) {
+    w = normTrab(w);
     const left = info.left, right = info.right;
-    // Fim fixo (varia só o início): o bloco cola no FIM do intervalo livre e cresce p/ trás.
-    if (w.varHorario && w.flexLado === 'inicio') {
-        const end = Math.min(right, J.fim), start = Math.max(left, end - durMin);
-        return { startMin: start, endMin: end, horas: Math.max(0, (end - start) / 60) };
-    }
-    const dIni = hhmmMin(w.desejInicio), dFim = hhmmMin(w.desejFim), prefDur = Math.max(0, dFim - dIni);
     let start, end;
-    if (durMin <= prefDur + 1e-6) {                               // <= preferido: usa o início preferido, recorta por aula
-        start = Math.max(dIni, left); end = start + durMin;
-        if (end > right) { end = right; start = end - durMin; }
-        if (start < left) start = left;
-    } else {                                                 // > preferido (compensação): mantém o preferido e estende p/ fora
-        start = Math.max(dIni, left); end = Math.min(dFim, right);
-        let need = durMin - (end - start);
-        const addEnd = Math.min(need, Math.max(0, right - end)); end += addEnd; need -= addEnd;
-        if (need > 0) { const addIni = Math.min(need, Math.max(0, start - left)); start -= addIni; need -= addIni; }
-    }
-    if (J.coreH > 0) { if (start > J.maxIni) start = J.maxIni; if (end < J.minFim) end = J.minFim; }  // garante o núcleo
-    start = Math.max(left, Math.max(J.ini, start)); end = Math.min(right, Math.min(J.fim, end));
+    if (w.modo === 'flexivel' && w.ancora === 'fim') { end = right; start = Math.max(left, end - durMin); }
+    else { start = left; end = Math.min(right, start + durMin); }
+    // múltiplos de 5 min, sem sair do intervalo livre [left, right] (não invade aula nem a folga)
+    const clamp = m => Math.min(right, Math.max(left, round5(m)));
+    start = clamp(start); end = clamp(end); if (end < start) end = start;
     return { startMin: start, endMin: end, horas: Math.max(0, (end - start) / 60) };
 }
 
-// distribui o total semanal buscando HOMOGENEIDADE (alvoSem/nDias por dia); só desvia quando a
-// capacidade de um dia força, redistribuindo a sobra aos dias com folga (water-filling)
+const MIN5 = 5 / 60;     // 5 minutos em horas
+// Arredonda horasPorDia à grade de 5 min PRESERVANDO a soma (método do maior resto): cada dia vai
+// p/ floor(quanta) e os quanta restantes p/ fechar o total são dados aos dias de maior fração — assim
+// o total semanal não perde minutos e a distribuição segue o mais homogênea possível. Respeita a
+// capacidade de cada dia (não ultrapassa o intervalo livre cortado pelas aulas).
+function snap5Aloc(horasPorDia, dias, capH, alvoSem) {
+    const capQ = {}, base = {}, frac = []; let baseSum = 0, capSum = 0;
+    for (const d of dias) {
+        capQ[d] = Math.floor(capH(d) / MIN5 + 1e-9);                 // capacidade em quanta de 5 min
+        const q = Math.min(horasPorDia[d] / MIN5, capQ[d]);
+        base[d] = Math.floor(q + 1e-9); baseSum += base[d]; capSum += capQ[d];
+        frac.push({ d, f: q - base[d] });
+    }
+    let resto = Math.min(Math.round(alvoSem / MIN5), capSum) - baseSum;   // quanta p/ fechar o total
+    frac.sort((a, b) => b.f - a.f);                                       // maior fração primeiro
+    for (const { d } of frac) { if (resto <= 0) break; if (base[d] < capQ[d]) { base[d]++; resto--; } }
+    while (resto > 0) { const d = dias.find(x => base[x] < capQ[x]); if (d == null) break; base[d]++; resto--; }
+    for (const d of dias) horasPorDia[d] = base[d] * MIN5;
+}
+
+// distribui o total semanal entre os dias úteis. FIXO: a janela inteira todo dia (bloco já travado).
+// FLEXÍVEL: busca HOMOGENEIDADE (alvoSem/nDias por dia) e só desvia quando a capacidade de um dia
+// força, redistribuindo a sobra aos dias com folga (water-filling). No fim, arredonda à grade de 5 min
+// preservando a soma (snap5Aloc), p/ os horários exibidos serem redondos sem perder o total semanal.
 function alocarTrab(w, infoPorDia) {
-    w = normTrab(w); const J = janelaTrab(w);
+    w = normTrab(w);
     const alvoSem = Math.max(0, +w.horas || 0);
     const dias = DIAS_UTEIS.filter(d => infoPorDia[d] != null);
     const horasPorDia = {}; dias.forEach(d => horasPorDia[d] = 0);
     const capH = d => infoPorDia[d].capH;
-    let conflitosNucleo = 0; dias.forEach(d => { if (!infoPorDia[d].coreLivre && J.coreH > 0) conflitosNucleo++; });
+    // conflitosNucleo só existe no fixo: dia cuja janela travada foi furada por uma aula.
+    let conflitosNucleo = 0;
+    if (w.modo === 'fixo') dias.forEach(d => { if (!infoPorDia[d].coreLivre) conflitosNucleo++; });
     if (!dias.length || alvoSem <= 0) return { horasPorDia, deficit: 0, rigidConf: 0, conflitosNucleo };
 
-    if (!w.varHoras) {                                       // não pode variar horas: meta igual por dia (COMANDO MÁXIMO)
-        const alvo = alvoSem / dias.length; let deficit = 0, rigidConf = 0;
-        dias.forEach(d => {
-            const cap = capH(d);
-            horasPorDia[d] = Math.min(alvo, cap);
-            const falta = alvo - cap;
-            if (falta > 1e-6) { deficit += falta; rigidConf++; }  // qualquer dia que não comporta a meta é conflito rígido
-        });
-        return { horasPorDia, deficit, rigidConf, conflitosNucleo };
-    }
-
-    // Horas variáveis: busca HOMOGENEIDADE (alvoSem/nDias por dia) e só aproveita a
-    // flexibilidade quando a média igual não cabe num dia. Water-filling: eleva um nível
-    // uniforme até fechar o total; o dia cuja capacidade (cortada pelas aulas) é menor que o
-    // nível satura na própria capacidade e LIBERA a sobra para os demais — assim a distribuição
-    // fica o mais homogênea possível e TODO dia com capacidade > 0 recebe trabalho.
-    const pendentes = dias.filter(d => capH(d) > 1e-6);
-    let restante = alvoSem, g = 0;
-    while (pendentes.length && restante > 1e-6 && g++ < 100) {
-        const nivel = restante / pendentes.length;
-        pendentes.sort((a, b) => capH(a) - capH(b));
-        const menor = pendentes[0];
-        if (capH(menor) <= nivel + 1e-9) {              // não comporta a média: satura e libera a sobra
-            horasPorDia[menor] = capH(menor); restante -= capH(menor); pendentes.shift();
-        } else {                                        // todos os pendentes comportam o nível: reparte igual
-            pendentes.forEach(d => horasPorDia[d] = nivel); restante = 0;
+    if (w.modo === 'fixo') {                                 // bloco = janela inteira todo dia útil
+        dias.forEach(d => horasPorDia[d] = capH(d));
+    } else {
+        // Water-filling: eleva um nível uniforme até fechar o total; o dia cuja capacidade (cortada
+        // pelas aulas) é menor que o nível satura na própria capacidade e LIBERA a sobra para os demais
+        // — assim fica o mais homogêneo possível e TODO dia com capacidade > 0 recebe trabalho.
+        const pendentes = dias.filter(d => capH(d) > 1e-6);
+        let restante = alvoSem, g = 0;
+        while (pendentes.length && restante > 1e-6 && g++ < 100) {
+            const nivel = restante / pendentes.length;
+            pendentes.sort((a, b) => capH(a) - capH(b));
+            const menor = pendentes[0];
+            if (capH(menor) <= nivel + 1e-9) {              // não comporta a média: satura e libera a sobra
+                horasPorDia[menor] = capH(menor); restante -= capH(menor); pendentes.shift();
+            } else {                                        // todos os pendentes comportam o nível: reparte igual
+                pendentes.forEach(d => horasPorDia[d] = nivel); restante = 0;
+            }
         }
     }
+    snap5Aloc(horasPorDia, dias, capH, alvoSem);            // grade de 5 min, soma preservada
     const total = dias.reduce((a, d) => a + horasPorDia[d], 0);
     return { horasPorDia, deficit: Math.max(0, alvoSem - total), rigidConf: 0, conflitosNucleo };
 }
@@ -212,13 +207,13 @@ function blocosTrabalhoCalc(w, ocupadoPorDia) {
     w = normTrab(w); ocupadoPorDia = ocupadoPorDia || {};
     const vazio = { intervalos: {}, slots: [], deficit: 0, conflitosNucleo: 0, rigidConf: 0, horasPorDia: {}, total: 0 };
     if (!w.trabalha || !(+w.horas > 0)) return vazio;
-    const J = janelaTrab(w); const info = {};
+    const info = {};
     for (const d of DIAS_UTEIS) info[d] = analiseDia(w, ocupadoPorDia[d] || []);
     const { horasPorDia, deficit, conflitosNucleo, rigidConf } = alocarTrab(w, info);
     const intervalos = {}, slots = []; let total = 0;
     for (const d of DIAS_UTEIS) {
         const horas = horasPorDia[d] || 0; if (horas <= 1e-6) continue;
-        const iv = placeBloco(w, J, horas * 60, info[d]);
+        const iv = placeBloco(w, horas * 60, info[d]);
         if (iv.horas <= 1e-6) continue;
         intervalos[d] = iv; total += iv.horas;
         for (const [p, s] of ORDEM_SLOTS) { const sm = SLOT_MIN[p + s]; if (iv.startMin < sm.fim && iv.endMin > sm.ini) slots.push({ diaSemana: d, periodo: p, slot: s, nome: 'Trabalho', auto: true }); }
@@ -276,7 +271,7 @@ function bloqueado(horarios, bloqueios) {
     return false;
 }
 // alguma aula de `horarios` invade a janela de trabalho FIXO [inicio, fim] (com folga)?
-// Mesma regra usada em gerarGrades para descartar turmas quando o horário é fixo (varHorario=NO).
+// Mesma regra usada em gerarGrades para descartar turmas quando o trabalho é modo === 'fixo'.
 function conflitaTrabalhoFixo(horarios, w) {
     w = normTrab(w);
     const wIni = hhmmMin(w.inicio), wFim = hhmmMin(w.fim), gap = Math.max(0, +w.folga || 0);
@@ -379,8 +374,8 @@ function gerarGrades(ctx, candOrdenadas, pref, bloqueios, usarGNH, deadline, tra
             let chosen = null;
             for (const t of c.turmas) {
                 if (usarGNH && t.horarios.length && conflita(t.horarios, ocup)) continue;
-                if (trab && !trab.varHorario && t.horarios.length) {
-                    // RESTRIÇÃO MÁXIMA: horário fixo (não pode variar início/fim) é COMANDO, não sugestão.
+                if (trab && trab.modo === 'fixo' && t.horarios.length) {
+                    // RESTRIÇÃO MÁXIMA: horário fixo é COMANDO, não sugestão.
                     // Nenhuma aula pode sobrepor a janela de trabalho [inicio, fim] em qualquer dia,
                     // incluindo a folga (intervalo mínimo trabalho↔aula) configurada — respeitada de igual forma.
                     const wIni = hhmmMin(trab.inicio), wFim = hhmmMin(trab.fim);
@@ -532,8 +527,8 @@ const API = {
     candidatasSemestre, prioridade, gerarGrades, calcularHoras, conflita, bloqueado, conflitaTrabalhoFixo,
     SLOTS, DIAS,
     ORDEM_SLOTS, hhmmMin, slotTexto, blocosTrabalho,
-    DIAS_UTEIS, DEFAULT_TRAB, normTrab, fmtHHMM, fmtDur, janelaTrab, capacidadeDia,
-    analiseDia, placeBloco, alocarTrab, ocupacaoPorDia, custoTrab, blocosTrabalhoCalc, desejHoras
+    DIAS_UTEIS, DEFAULT_TRAB, normTrab, fmtHHMM, fmtDur, janelaTrab, janelaHoras, capacidadeDia,
+    analiseDia, placeBloco, alocarTrab, ocupacaoPorDia, custoTrab, blocosTrabalhoCalc
 };
 
 export default API;

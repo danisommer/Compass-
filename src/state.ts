@@ -4,6 +4,7 @@ import K from './engine';
 const DEFAULT_PREF = { campusUnico: false, campus: 'CURITIBA', turnos: ['M', 'T', 'N'], cargaMin: 4, cargaMax: 7, preferenciaTrilhas: [], eletivaManual: 0 };
 let S: any = null;          // estado persistido
 let D: any = {};            // derivado (não persistido)
+const MAXSEM = 14;          // horizonte máximo de semestres projetados (a partir de 2026/2)
 
 function novoEstado() {
     return {
@@ -39,17 +40,17 @@ function manualBlocos(idx) { return (S.bloqueios && S.bloqueios[idx]) || []; }
 function trabDoSem(idx) { return (S.trabalho && S.trabalho[idx]) || null; }
 // S2: o usuário já respondeu se trabalha (Sim/Não) neste semestre?
 function trabRespondido(idx) { const w = trabDoSem(idx); return !!w && (w.trabalha === true || w.trabalha === false); }
-// "horário flexível" p/ a UI = pode variar o início/fim entre os dias → aula sobre o trabalho é permitida
-// (encaixa ao redor). Quando FALSE, o horário é fixo e trava a grade.
-function trabFlex(idx) { const w = trabDoSem(idx); return !!(w && w.trabalha && w.varHorario); }
+// "horário flexível" p/ a UI = modo flexível → o trabalho se molda ao redor das aulas (aula sobre o
+// trabalho é permitida). No modo fixo, a janela trava a grade.
+function trabFlex(idx) { const w = K.normTrab(trabDoSem(idx)); return !!(w && w.trabalha && w.modo === 'flexivel'); }
 // blocos de trabalho (auto) calculados a partir de uma seleção de grade
 function trabCalc(idx, sel) { return K.blocosTrabalhoCalc(trabDoSem(idx), K.ocupacaoPorDia(sel || [])); }
 function totalBloqueios() { let n = 0; for (const i in (S.bloqueios || {})) n += S.bloqueios[i].length; return n; }
 
 /* ---- Configurações de trabalho nomeadas (presets, globais) ---- */
-const TRAB_CFG_KEYS = ['horas', 'inicio', 'maxComeco', 'minFim', 'fim', 'varHoras', 'varHorario', 'desejInicio', 'desejFim', 'diasVariaveis', 'diasPreferidos', 'folga'];
-function trabCfgDe(w) { const n = K.normTrab(w); const o = {}; TRAB_CFG_KEYS.forEach(k => o[k] = k === 'diasPreferidos' ? n[k].slice().sort() : n[k]); return o; }
-function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return TRAB_CFG_KEYS.every(k => k === 'diasPreferidos' ? (x[k].join(',') === y[k].join(',')) : (x[k] === y[k])); }
+const TRAB_CFG_KEYS = ['modo', 'horas', 'inicio', 'fim', 'ancora', 'folga'];
+function trabCfgDe(w) { const n = K.normTrab(w); const o = {}; TRAB_CFG_KEYS.forEach(k => o[k] = n[k]); return o; }
+function mesmaCfgTrab(a, b) { const x = trabCfgDe(a), y = trabCfgDe(b); return TRAB_CFG_KEYS.every(k => x[k] === y[k]); }
 function salvarPresetTrab(idx, nome) { S.trabPresets = S.trabPresets || []; const cfg = trabCfgDe(trabRascunhoOuSalvo(idx)); const ex = S.trabPresets.find(p => p.nome === nome); if (ex) { ex.cfg = cfg; } else { S.trabPresets.push({ id: 'p' + Date.now() + Math.floor(Math.random() * 1e4), nome, cfg }); } }
 function aplicarPresetTrab(idx, id) { const p = (S.trabPresets || []).find(p => p.id === id); if (!p) return; S.trabalho[idx] = K.normTrab(Object.assign({}, p.cfg, { trabalha: true })); }
 function excluirPresetTrab(id) { S.trabPresets = (S.trabPresets || []).filter(p => p.id !== id); }
@@ -69,16 +70,18 @@ function trabAplicarRascunho(idx) {
 }
 function trabDescartarRascunho(idx) { if (S.trabRascunho) delete S.trabRascunho[idx]; }
 // S3: replica a configuração de horários travados (trabalho + bloqueios manuais) de `idx`
-// para todos os semestres projetados seguintes.
+// para todos os semestres seguintes. Preenche até o fim do horizonte (MAXSEM), não só até o último
+// semestre atualmente projetado: travar o trabalho pode ADIAR a formatura para um semestre ainda não
+// projetado, que também precisa herdar a configuração (senão a formatura aparece sem o trabalho).
 function aplicarTrabSeguintes(idx) {
     const w = K.normTrab(trabDoSem(idx)); const cfg = trabCfgDe(w); const manuais = manualBlocos(idx);
+    const projetados = new Set((D.projecao || []).map(s => s.idx));
     let n = 0;
-    (D.projecao || []).forEach(s => {
-        if (s.idx <= idx) return;
-        S.trabalho[s.idx] = K.normTrab(Object.assign({}, cfg, { trabalha: w.trabalha }));
-        if (manuais.length) S.bloqueios[s.idx] = manuais.map(b => ({ ...b })); else delete S.bloqueios[s.idx];
-        n++;
-    });
+    for (let i = idx + 1; i <= MAXSEM; i++) {
+        S.trabalho[i] = K.normTrab(Object.assign({}, cfg, { trabalha: w.trabalha }));
+        if (manuais.length) S.bloqueios[i] = manuais.map(b => ({ ...b })); else delete S.bloqueios[i];
+        if (projetados.has(i)) n++;        // conta só os já visíveis (para a mensagem)
+    }
     limparEscolhasApos(idx);
     return n;
 }
@@ -174,7 +177,7 @@ function disciplinaAjuda(d, h) {
 function temTurmaViavel(c, idx) {
     const bloqs = manualBlocos(idx);
     const w = K.normTrab(trabDoSem(idx));
-    const trabFixo = !!w.trabalha && !w.varHorario && +w.horas > 0;
+    const trabFixo = !!w.trabalha && w.modo === 'fixo' && +w.horas > 0;
     return (c.turmas || []).some(t => {
         const hor = t.horarios || [];
         if (!hor.length) return true;   // sem horário detalhado → não há conflito de horário
@@ -200,7 +203,7 @@ function classificarTerminal(horas, cursadasSet, candUteis, idx) {
 function motivosImpossivel(obrigPend, candUteis, cursadasSet, idx) {
     const bloqs = manualBlocos(idx);
     const w = K.normTrab(trabDoSem(idx));
-    const trabFixo = !!w.trabalha && !w.varHorario && +w.horas > 0;
+    const trabFixo = !!w.trabalha && w.modo === 'fixo' && +w.horas > 0;
     const motivos = [], visto = new Set();
     const analisar = (d, turmas) => {
         if (visto.has(d.codigo)) return; visto.add(d.codigo);
@@ -256,7 +259,6 @@ function projetar() {
     // a partir de 2026/2 assume-se que as em-andamento foram aprovadas
     cursadas = new Set([...cursadas, ...D.emAndamento]);
 
-    const MAXSEM = 14;
     for (let idx = 1; idx <= MAXSEM; idx++) {
         const curIdx = new Set(cursadas);
         const cand = K.candidatasSemestre(D.ctx, curIdx, new Set(), true);

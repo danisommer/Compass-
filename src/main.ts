@@ -263,28 +263,32 @@ function blocosSemestreHTML(sem) {
     const wSalvo = K.normTrab(trabDoSem(idx));
     const trab = sem.trab || {};
     const nMan = bloqEfetivos(idx).length;   // conta o rascunho de bloqueios (o que está visível na grade)
-    const J = K.janelaTrab(w);
     const dn = { 2: 'Seg', 3: 'Ter', 4: 'Qua', 5: 'Qui', 6: 'Sex' };
     const resumo = K.DIAS_UTEIS.map(d => {
         const iv = trab.intervalos && trab.intervalos[d];
         return iv ? `<b>${dn[d]}</b> ${K.fmtHHMM(iv.startMin)}–${K.fmtHHMM(iv.endMin)} (${K.fmtDur(iv.horas)})` : `<b>${dn[d]}</b> livre`;
     }).join(' · ');
     const folgaLabel = `<label style="flex-basis:100%" data-tip="Deslocamento mínimo entre o trabalho e qualquer aula (vale nos dois sentidos: fim do trabalho → início da aula e fim da aula → início do trabalho)">🚍 Intervalo mín. trabalho↔aula <input type="number" min="0" max="240" step="5" value="${w.folga}" data-trab="folga" data-sem="${idx}"> min</label>`;
-    // Campos do trabalho. A janela [início, fim] é definida pelos mesmos campos (comeco/termino);
-    // o que muda com varHorario é o rótulo e o comportamento: fixo trava a grade, flexível se molda.
-    const campoHoras = `<label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>`;
-    const campoJanela = w.varHorario
-        ? `<label>Trabalhar entre <input type="time" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> e <input type="time" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— faixa-limite: o trabalho se encaixa ao redor das aulas (a faixa pode ser maior que o total diário)</span></label>`
-        : `<label>Trabalhar das <input type="time" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> às <input type="time" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— janela fixa todos os dias (= total diário); nenhuma aula pode ocupá-la</span></label>`;
-    const camposTrab = `${campoHoras}
-    ${campoJanela}
+    // Campos do trabalho. UM modo (fixo|flexível) define o sentido da janela [início, fim]:
+    //  • flexível → faixa-limite onde o trabalho se molda; horas/semana é perguntado.
+    //  • fixo     → bloco exato que trava a grade; horas/semana é DERIVADO (janela × 5 dias).
+    const isFlex = w.modo === 'flexivel';
+    const campoHoras = isFlex
+        ? `<label>Horas/semana (total) <input type="number" min="0" max="60" value="${w.horas}" data-trab="horas" data-sem="${idx}"></label>`
+        : `<label class="muted" style="flex-basis:100%">Carga semanal: <b>${K.fmtDur(w.horas)}</b> <span class="muted">— derivada da janela (janela × 5 dias úteis)</span></label>`;
+    const campoJanela = isFlex
+        ? `<label>Trabalhar entre <input type="time" step="300" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> e <input type="time" step="300" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— faixa-limite: o trabalho se encaixa ao redor das aulas</span></label>`
+        : `<label>Trabalhar das <input type="time" step="300" value="${w.inicio}" data-trab="comeco" data-sem="${idx}"> às <input type="time" step="300" value="${w.fim}" data-trab="termino" data-sem="${idx}"> <span class="muted">— janela fixa todo dia; nenhuma aula pode ocupá-la</span></label>`;
+    const camposTrab = `${campoJanela}
+    ${campoHoras}
     ${folgaLabel}`;
-    const flexLado = w.flexLado || 'ambos';
-    // Rádios (mutuamente exclusivos) que aparecem quando o usuário pode variar o horário.
-    const flexLadoRadios = w.varHorario ? `
+    // Âncora (só flexível): onde o bloco diário se fixa quando há aula no meio da janela.
+    const ancora = w.ancora || 'livre';
+    const ancoraRadios = isFlex ? `
+    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">📌 Onde o trabalho se fixa?</span>
     <div class="flexlado" style="flex-basis:100%">
-    ${[['inicio', 'Somente o horário de começo'], ['fim', 'Somente o horário de fim'], ['ambos', 'Ambos']].map(([v, t]) => `<button class="flexlado-opt ${flexLado === v ? 'on' : ''}" data-trab-flexlado="${v}" data-sem="${idx}"><span class="rb"></span>${t}</button>`).join('')}
-    </div>` : '';
+    ${[['inicio', 'No começo (cresce p/ a tarde)'], ['fim', 'No fim (cresce p/ a manhã)'], ['livre', 'Sem preferência']].map(([v, t]) => `<button class="flexlado-opt ${ancora === v ? 'on' : ''}" data-trab-ancora="${v}" data-sem="${idx}"><span class="rb"></span>${t}</button>`).join('')}
+    </div></label>` : '';
     const presets = S.trabPresets || [];
     // Controles de configurações salvas + propagação (só fazem sentido com trabalho ativo).
     const presetControls = w.trabalha ? `
@@ -321,21 +325,15 @@ function blocosSemestreHTML(sem) {
         <button class="seg ${w.trabalha === false ? 'on' : ''}" data-trab-nao="${idx}">Não</button>
     </span></label>
     ${w.trabalha ? `
-    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">⏱️ Você pode variar a quantidade de horas por dia?</span>
+    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🕐 Como é o seu horário de trabalho?</span>
     <span class="segbtn">
-        <button class="seg ${w.varHoras ? 'on' : ''}" data-trab-varhoras="1" data-sem="${idx}">Sim</button>
-        <button class="seg ${!w.varHoras ? 'on' : ''}" data-trab-varhoras="0" data-sem="${idx}">Não</button>
+        <button class="seg ${w.modo === 'fixo' ? 'on' : ''}" data-trab-modo="fixo" data-sem="${idx}">Fixo</button>
+        <button class="seg ${isFlex ? 'on' : ''}" data-trab-modo="flexivel" data-sem="${idx}">Flexível</button>
     </span>
-    <span class="muted">${w.varHoras ? 'as horas podem diferir entre os dias' : 'mesma carga horária todos os dias'}</span></label>
-    <label style="flex-basis:100%;gap:8px"><span style="color:var(--text);font-weight:600">🕐 Você pode variar o horário de início e fim entre os dias?</span>
-    <span class="segbtn">
-        <button class="seg ${w.varHorario ? 'on' : ''}" data-trab-varhorario="1" data-sem="${idx}">Sim</button>
-        <button class="seg ${!w.varHorario ? 'on' : ''}" data-trab-varhorario="0" data-sem="${idx}">Não</button>
-    </span>
-    <span class="muted">${w.varHorario ? 'o trabalho se molda ao redor das aulas dentro da janela' : 'horário fixo — trava a grade contra aulas nesse intervalo'}</span></label>
-    ${flexLadoRadios}
+    <span class="muted">${isFlex ? 'encaixo a carga semanal ao redor das aulas (distribuição homogênea entre os dias)' : 'mesmo intervalo todo dia — trava a grade contra aulas nesse horário'}</span></label>
     ${camposTrab}
-    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${wSalvo.horas}h fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no horário de trabalho</span>` : ''}${trab.rigidConf ? ` · <span style="color:var(--secondary)">⚠ ${trab.rigidConf} dia(s) não comportam a carga</span>` : ''}</div>
+    ${ancoraRadios}
+    <div style="flex-basis:100%;border-top:1px solid var(--line);padding-top:8px" class="muted">📅 Trabalho encaixado na grade escolhida: ${resumo}${trab.deficit > 1e-6 ? ` · <span style="color:var(--secondary)">faltam ${K.fmtDur(trab.deficit)} p/ fechar o total semanal</span>` : ` · <span style="color:var(--success)">total de ${K.fmtDur(wSalvo.horas)} fechado</span>`}${trab.conflitosNucleo ? ` · <span style="color:var(--secondary)">⚠ ${trab.conflitosNucleo} dia(s) com aula no horário de trabalho fixo</span>` : ''}</div>
     `: ''}
 </div>
 <div style="padding:0 16px 8px" class="muted">Clique numa célula para travar manualmente; <b>clique e arraste verticalmente</b> (mesmo dia) p/ travar vários. O bloco de <b style="color:#9cc0ff">Trabalho</b> (azul) é calculado automaticamente ao redor das aulas da grade escolhida e varia por dia quando você pode variar o horário entre os dias.</div>
@@ -818,9 +816,8 @@ function planoSemestreHTML(sem) {
     // trabalho: conflito de núcleo / déficit semanal na grade escolhida
     const tw = K.normTrab(trabDoSem(sem.idx)); const tb = sem.trab;
     if (tw.trabalha && (+tw.horas > 0) && tb && escolhida.sel.length) {
-        if (tb.conflitosNucleo > 0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>horário de trabalho obrigatório</b> em ${sem.rotulo}. Esse intervalo é sempre trabalhado — amplie a janela de horário ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
-        else if (tb.rigidConf > 0) banners.push(`<div class="banner warn">⚠ ${tb.rigidConf} dia(s) não comportam a carga de trabalho por causa das aulas em ${sem.rotulo}. Permita variar as horas por dia (ou o horário entre os dias), ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
-        else if (tb.deficit > 1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${tw.horas}h). ${tw.varHoras ? 'O sistema priorizou as grades que melhor aproveitam sua disponibilidade.' : 'Permita variar a quantidade de horas por dia para encaixar melhor.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        if (tb.conflitosNucleo > 0) banners.push(`<div class="banner warn">⚠ ${tb.conflitosNucleo} dia(s) têm aula dentro do <b>horário de trabalho fixo</b> em ${sem.rotulo}. Esse intervalo é sempre travado — reduza a janela de trabalho ou escolha outra grade. <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
+        else if (tb.deficit > 1e-6) banners.push(`<div class="banner info">ℹ Nesta grade só cabem <b>${K.fmtDur(tb.total)}</b> de trabalho/sem (faltam ${K.fmtDur(tb.deficit)} para o total de ${K.fmtDur(tw.horas)}). ${tw.modo === 'flexivel' ? 'O sistema priorizou as grades que melhor aproveitam sua disponibilidade.' : 'As aulas reduzem a janela de trabalho fixo nesta grade — reduza a janela ou escolha outra grade.'} <span class="b-actions"><button class="btn btn-sm btn-ghost" data-abrir-blocos="${sem.idx}">Ajustar trabalho</button></span></div>`);
     }
 
     const editorAberto = S.editor && S.editor.idx === sem.idx;
@@ -1152,9 +1149,8 @@ async function onClick(e) {
     // Trabalho: Sim/Não e Flex escrevem no rascunho; só "Aplicar" dispara o recálculo
     const tsim = t.closest('[data-trab-sim]'); if (tsim) { const i = +tsim.dataset.trabSim; trabRascunhoSet(i, { trabalha: true }); salvar(); rerenderKeepOpen(); return; }
     const tnao = t.closest('[data-trab-nao]'); if (tnao) { const i = +tnao.dataset.trabNao; trabRascunhoSet(i, { trabalha: false }); salvar(); rerenderKeepOpen(); return; }
-    const tvh = t.closest('[data-trab-varhoras]'); if (tvh) { const i = +tvh.dataset.sem; trabRascunhoSet(i, { varHoras: tvh.dataset.trabVarhoras === '1' }); salvar(); rerenderKeepOpen(); return; }
-    const tvt = t.closest('[data-trab-varhorario]'); if (tvt) { const i = +tvt.dataset.sem; trabRascunhoSet(i, { varHorario: tvt.dataset.trabVarhorario === '1' }); salvar(); rerenderKeepOpen(); return; }
-    const tfl = t.closest('[data-trab-flexlado]'); if (tfl) { const i = +tfl.dataset.sem; trabRascunhoSet(i, { flexLado: tfl.dataset.trabFlexlado }); salvar(); rerenderKeepOpen(); return; }
+    const tmo = t.closest('[data-trab-modo]'); if (tmo) { const i = +tmo.dataset.sem; trabRascunhoSet(i, { modo: tmo.dataset.trabModo }); salvar(); rerenderKeepOpen(); return; }
+    const tan = t.closest('[data-trab-ancora]'); if (tan) { const i = +tan.dataset.sem; trabRascunhoSet(i, { ancora: tan.dataset.trabAncora }); salvar(); rerenderKeepOpen(); return; }
     // Aplicar rascunho -> copia trabalho E bloqueios manuais para o estado salvo e recalcula
     const tapl = t.closest('[data-trab-aplicar]'); if (tapl) { const i = +tapl.dataset.trabAplicar; const a = trabAplicarRascunho(i); const b = bloqAplicarRascunho(i); if (a || b) limparEscolhasDesde(i); toast('Horários travados aplicados · grades recalculadas'); rerenderKeepOpen(); return; }
     // Descartar rascunho -> restaura trabalho E bloqueios salvos
@@ -1233,28 +1229,13 @@ function onChange(e) {
     const tr = e.target.closest('[data-trab]');
     if (tr) {
         const i = +tr.dataset.sem, k = tr.dataset.trab;
-        const cur = trabRascunhoOuSalvo(i);
-        const toHHMM = m => { m = Math.max(0, Math.min(1439, Math.round(m))); return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`; };
+        // Início e fim definem a janela [inicio, fim] (bloco exato no fixo; faixa-limite no flexível).
+        // No fixo, a carga semanal é derivada da janela em normTrab — não há acoplamento manual aqui.
         const updates: any = {};
-        // Acoplamento horas ↔ janela SÓ no horário fixo ("Trabalhar das X às Y"): aí a janela É o trabalho,
-        // então a largura diária = horas/semana ÷ 5 e mexer numa ponta recalcula a outra.
-        // No flexível ("Trabalhar entre"), a faixa é só um limite (pode conter mais horas que o total
-        // diário), então início e fim são independentes.
-        const acopla = !cur.varHorario;
-        if (k === 'horas') {
-            const horas = +tr.value || 0;
-            updates.horas = horas;
-            if (acopla) updates.fim = updates.minFim = updates.desejFim = toHHMM(K.hhmmMin(cur.inicio) + horas / 5 * 60);
-        } else if (k === 'comeco') {
-            updates.inicio = updates.maxComeco = updates.desejInicio = tr.value;
-            if (acopla) updates.fim = updates.minFim = updates.desejFim = toHHMM(K.hhmmMin(tr.value) + (+cur.horas || 0) / 5 * 60);
-        } else if (k === 'termino') {
-            updates.fim = updates.minFim = updates.desejFim = tr.value;
-            if (acopla) updates.inicio = updates.maxComeco = updates.desejInicio = toHHMM(K.hhmmMin(tr.value) - (+cur.horas || 0) / 5 * 60);
-        } else {
-            const numericos = { diasVariaveis: 1, folga: 1 };
-            updates[k] = numericos[k] ? (+tr.value || 0) : tr.value;
-        }
+        if (k === 'comeco') updates.inicio = tr.value;
+        else if (k === 'termino') updates.fim = tr.value;
+        else if (k === 'horas' || k === 'folga') updates[k] = +tr.value || 0;
+        else updates[k] = tr.value;
         trabRascunhoSet(i, updates);
         salvar(); rerenderKeepOpen(); return;
     }
